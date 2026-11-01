@@ -9,7 +9,7 @@ from urllib import request
 
 from active_mode import read_active_mode
 from auth import read_secret_file
-from tariff_schema import canonical_hash, validate_tariff
+from tariff_schema import canonical_hash, validate_tariff, select_installed_tariff
 
 MAX_RESPONSE = 2 * 1024 * 1024
 
@@ -82,9 +82,10 @@ def read_live_readback():
     site = sites[0]['energy_site_id']
     prefix = 'api/1/energy_sites/' + str(site) + '/'
     info = _get(prefix + 'site_info').get('response')
-    tariff = _get(prefix + 'tariff_rate').get('response')
-    if not isinstance(info, dict) or not isinstance(tariff, dict):
+    rate_tariff = _get(prefix + 'tariff_rate').get('response')
+    if not isinstance(info, dict) or not isinstance(rate_tariff, dict):
         raise ValueError('tessie_site_readback_invalid')
+    tariff, tariff_source = select_installed_tariff(info, rate_tariff)
     _safe_tariff(tariff)
     if validate_tariff(tariff, strict_compatibility=False):
         raise ValueError('tessie_tariff_schema_invalid')
@@ -93,6 +94,7 @@ def read_live_readback():
     digest = canonical_hash(tariff)
     backup = {'captured_at': captured, 'energy_site_id': site,
         'source': 'Explicit Tessie HTTPS GET; no Tesla controls',
+        'tariff_observation_source': tariff_source,
         'tariff_rate_response': tariff, 'sha256': digest}
     settings = {}
     if info.get('default_real_mode') in ('autonomous', 'self_consumption', 'backup'):
@@ -101,6 +103,7 @@ def read_live_readback():
     if type(reserve) in (int, float) and 0 <= reserve <= 100:
         settings['backup_reserve_percent'] = reserve
     readback = {'captured_at': captured, 'tariff_sha256': digest,
+        'tariff_observation_source': tariff_source,
         'energy_data_scope': 'energy_device_data' in scopes,
         'energy_commands_scope': 'energy_cmds' in scopes,
         'site_settings': settings, 'active_mode': active['mode'],

@@ -22,13 +22,15 @@ UTC=timezone.utc
 class ModeTransportTests(unittest.TestCase):
     def run_child(self, *, action='self_powered', cloud_mode='autonomous',
                   reply=None, post_status=200, changed_settings=False, proceed=True,
-                  allow_child_failure=False):
+                  allow_child_failure=False, saved_configuration=False, invalid_configuration=False,
+                  invalid_rate=False):
         period={'fromDayOfWeek':0,'toDayOfWeek':6,'fromHour':0,'fromMinute':0,
                 'toHour':0,'toMinute':0}
         channel={'currency':'GBP','energy_charges':{'Y':{'R':.3}},
                  'seasons':{'Y':{'fromMonth':1,'fromDay':1,'toMonth':12,'toDay':31,
                                  'tou_periods':{'R':[period]}}}}
         tariff=deepcopy(channel);tariff['sell_tariff']=deepcopy(channel)
+        saved=deepcopy(tariff);saved['energy_charges']['Y']['R']=.4
         preserve={'backup_reserve':10,'grid_charging':'not_reported','export_permission':'battery_ok'}
         expected={'energy_site_id':123,'current_tariff_hash':semantic_hash(tariff),
                   'preserve_settings':preserve}
@@ -60,11 +62,16 @@ class ModeTransportTests(unittest.TestCase):
                 if path=='/auth/tesla_scopes':return Response({'scopes':['energy_cmds']})
                 if path=='/api/1/products':
                     return Response({'response':[{'energy_site_id':123,'components':{'battery':True}}]})
-                if path.endswith('/tariff_rate'):return Response({'response':tariff})
+                if path.endswith('/tariff_rate'):
+                    return Response([] if invalid_rate else {'response':tariff})
                 if path.endswith('/site_info'):
-                    return Response({'response':{'default_real_mode':cloud_mode,
+                    info={'default_real_mode':cloud_mode,
                         'backup_reserve_percent':20 if changed_settings else 10,
-                        'components':{'customer_preferred_export_rule':'battery_ok'}}})
+                        'components':{'customer_preferred_export_rule':'battery_ok'}}
+                    if saved_configuration:
+                        info.update(tariff_content=saved,tariff_content_v2={'invalid':'shape'})
+                    if invalid_configuration:info['tariff_content']={'invalid':'shape'}
+                    return Response({'response':info})
                 raise AssertionError('Unexpected endpoint')
         module=types.ModuleType('aiohttp');module.ClientSession=Session
         module.ClientTimeout=lambda **kwargs:kwargs
@@ -139,3 +146,21 @@ class ModeTransportTests(unittest.TestCase):
         self.assertEqual(replies[-1]['mode_http_status'],503)
         self.assertIsNotNone(replies[-1]['mode_http_completed_at'])
         self.assertEqual(len([row for row in calls if row[0]=='POST']),1)
+
+    def test_read_snapshot_prefers_saved_configuration_to_old_projection(self):
+        old,_calls=self.run_child(action='read')
+        saved,calls=self.run_child(action='read',saved_configuration=True)
+        self.assertEqual(saved[-1]['tariff_observation_source'],'site_info.tariff_content')
+        self.assertNotEqual(saved[-1]['current_tariff_hash'],old[-1]['current_tariff_hash'])
+        self.assertFalse(any(row[0]=='POST' for row in calls))
+
+    def test_invalid_saved_configuration_refuses_read_and_mode_dispatch(self):
+        for action in ('read','self_powered'):
+            replies,calls=self.run_child(action=action,invalid_configuration=True,allow_child_failure=True)
+            self.assertTrue(replies[-1]['adapter_failed'])
+            self.assertFalse(any(row[0]=='POST' for row in calls))
+
+    def test_valid_saved_configuration_does_not_require_valid_lower_projection_body(self):
+        replies,calls=self.run_child(action='read',saved_configuration=True,invalid_rate=True)
+        self.assertEqual(replies[-1]['tariff_observation_source'],'site_info.tariff_content')
+        self.assertFalse(replies[-1]['command_sent']);self.assertEqual(len(calls),4)

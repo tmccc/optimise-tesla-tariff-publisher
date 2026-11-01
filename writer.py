@@ -188,10 +188,11 @@ async def main():
         async def snapshot():
             tariff_reply=await request('GET',prefix+'tariff_rate')
             info_reply=await request('GET',prefix+'site_info')
-            tariff=tariff_reply.get('response') if isinstance(tariff_reply,dict) else None
+            rate_tariff=tariff_reply.get('response') if isinstance(tariff_reply,dict) else None
             info=info_reply.get('response') if isinstance(info_reply,dict) else None
-            if not isinstance(info,dict) or not isinstance(tariff,dict):
+            if not isinstance(info,dict):
                 raise ValueError('readback_unavailable')
+            tariff,tariff_source=schema.select_installed_tariff(info,rate_tariff)
             components=info.get('components',{})
             if not isinstance(components,dict):components={}
             reserve=info.get('backup_reserve_percent')
@@ -204,6 +205,7 @@ async def main():
             mode=info.get('default_real_mode')
             if mode not in {'autonomous','self_consumption'}:mode='unknown'
             return {'energy_site_id':site,'current_tariff_hash':schema.semantic_hash(tariff),
+                'tariff_observation_source':tariff_source,
                 'mode':mode,'preserve_settings':keep,
                 'energy_commands_granted':'energy_cmds' in scopes,
                 'live_last_success':datetime.now(timezone.utc).isoformat()}
@@ -387,7 +389,8 @@ class TariffWriter:
             readback=result.get('readback')
             if not isinstance(readback,dict):
                 readback={key:result.get(key) for key in ('energy_site_id','current_tariff_hash',
-                    'mode','preserve_settings','energy_commands_granted','live_last_success')}
+                    'mode','preserve_settings','energy_commands_granted','live_last_success',
+                    'tariff_observation_source')}
                 readback['observed_at']=result.get('observed_at') or result.get('live_last_success')
             readback.update({key:result.get(key) for key in ('battery_enrolled','enrolled_last_success')})
             result['readback']=readback

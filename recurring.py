@@ -23,7 +23,7 @@ from readback import _get
 from active_mode import read_active_mode
 from optimise_tariff_preview.compiler import compile_preview
 from date_compiler import build_date_candidate
-from tariff_schema import semantic_hash, rate_at
+from tariff_schema import semantic_hash, rate_at, select_installed_tariff
 from writer import TariffWriter, validate_candidate
 from recurring_state import decide_cycle, _instant
 from recurring_records import commit_lease
@@ -69,7 +69,13 @@ def collect():
         if source.get('source_validation_errors'):
             preview['valid'] = False
         site = snapshot['energy_site_id']
-        baseline = _get(f'api/1/energy_sites/{site}/tariff_rate').get('response')
+        info = _get(f'api/1/energy_sites/{site}/site_info').get('response')
+        # Some sites return an older processed tariff from tariff_rate while
+        # site_info already exposes the saved configuration. Use the same
+        # explicit selection as all command preflights and ownership reads.
+        rate = (None if info and (info.get('tariff_content') or info.get('tariff_content_v2'))
+            else _get(f'api/1/energy_sites/{site}/tariff_rate').get('response'))
+        baseline, baseline_source = select_installed_tariff(info, rate)
         if semantic_hash(baseline) != snapshot['current_tariff_hash']:
             raise ValueError('tariff_changed_during_collection')
         built = build_date_candidate(preview, baseline, now=now(), unquoted_policy='frozen_current_quote')

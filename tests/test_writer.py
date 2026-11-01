@@ -288,7 +288,8 @@ class WriterTests(unittest.TestCase):
         ast.parse(REMOTE)
 
     def remote_fixture(self, *, accepted=True, apply=True, post_status=200, changed_before=False,
-                       token_configured=True, reply_body=None, recurring=False, cloud_mode='autonomous'):
+                       token_configured=True, reply_body=None, recurring=False, cloud_mode='autonomous',
+                       saved_configuration=False, stale_rate=False, invalid_configuration=False):
         """Execute actual embedded logic with fake HTTP/auth boundaries only."""
         candidate=deepcopy(self.candidate)
         old=deepcopy(candidate)
@@ -335,9 +336,14 @@ class WriterTests(unittest.TestCase):
                 if method!='GET':raise AssertionError('Wrong HTTP method')
                 if path=='/auth/tesla_scopes':return Response({'scopes':['energy_device_data','energy_cmds']})
                 if path=='/api/1/products':return Response({'response':[{'energy_site_id':123,'components':{'battery':True}}]})
-                if path.endswith('/tariff_rate'):return Response({'response':candidate if posted[0] else old})
+                if path.endswith('/tariff_rate'):
+                    return Response({'response':candidate if posted[0] and not stale_rate else old})
                 if path.endswith('/site_info'):
                     body=deepcopy(info)
+                    if saved_configuration:
+                        body['tariff_content']=deepcopy(candidate if posted[0] else old)
+                        body['tariff_content_v2']={'invalid':'shape'}
+                    if invalid_configuration:body['tariff_content']={'invalid':'shape'}
                     if changed_before:body['backup_reserve_percent']=20
                     return Response({'response':body})
                 raise AssertionError('Unexpected endpoint')
@@ -420,6 +426,19 @@ class WriterTests(unittest.TestCase):
         self.assertTrue(values[0]['preflight_ready'])
         self.assertTrue(values[-1]['readback_verified'])
         self.assertEqual(sum(method=='POST' for method,_,_ in calls),1)
+
+    def test_actual_child_verifies_saved_configuration_while_rate_projection_lags(self):
+        values,calls=self.remote_fixture(saved_configuration=True,stale_rate=True)
+        self.assertTrue(values[0]['preflight_ready'])
+        self.assertTrue(values[-1]['readback_verified'])
+        self.assertEqual(values[-1]['tariff_observation_source'],'site_info.tariff_content')
+        self.assertEqual(values[-1]['readback']['tariff_observation_source'],'site_info.tariff_content')
+        self.assertEqual(sum(method=='POST' for method,_,_ in calls),1)
+
+    def test_actual_child_invalid_saved_configuration_cannot_hide_behind_rate(self):
+        values,calls=self.remote_fixture(invalid_configuration=True)
+        self.assertFalse(values[-1]['command_sent'])
+        self.assertFalse(any(method=='POST' for method,_,_ in calls))
 
 
 if __name__=='__main__':unittest.main()

@@ -329,6 +329,31 @@ def validate_tariff(tariff: Any, *, strict_compatibility: bool = True) -> list[s
     return sorted(errors)
 
 
+def select_installed_tariff(info: Any, rate_tariff: Any) -> tuple[dict, str]:
+    """Select saved configuration before a potentially lagging rate projection.
+
+    A populated higher-priority field is authoritative: malformed configuration
+    fails closed rather than being hidden by an older but valid alternative.
+    Empty objects and nulls mean the field is unavailable. Complete structural
+    validation is required, while existing buy/sell incompatibility remains
+    readable; selection itself never grants permission to upload that tariff.
+    """
+    if not isinstance(info, dict):
+        raise TariffValidationError(['site_info_not_object'])
+    for field in ('tariff_content', 'tariff_content_v2'):
+        candidate = info.get(field)
+        if candidate is None or (isinstance(candidate, dict) and not candidate):
+            continue
+        errors = validate_tariff(candidate, strict_compatibility=False)
+        if errors:
+            raise TariffValidationError(['installed_' + field + '_invalid', *errors])
+        return copy.deepcopy(candidate), 'site_info.' + field
+    errors = validate_tariff(rate_tariff, strict_compatibility=False)
+    if errors:
+        raise TariffValidationError(['installed_tariff_rate_invalid', *errors])
+    return copy.deepcopy(rate_tariff), 'tariff_rate'
+
+
 def rate_at(tariff: Any, instant: datetime, direction: str = 'import', timezone: str = 'Europe/London') -> Decimal:
     """Evaluate a complete structural tariff at an aware instant.
 

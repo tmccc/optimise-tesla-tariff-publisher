@@ -80,10 +80,13 @@ async def main():
         if site<=0:raise ValueError('site_invalid')
         prefix='/api/1/energy_sites/'+str(site)+'/'
         allowed.update({prefix+'site_info',prefix+'tariff_rate'})
-        info=(await request('GET',prefix+'site_info')).get('response')
-        tariff=(await request('GET',prefix+'tariff_rate')).get('response')
-        if not isinstance(info,dict) or not isinstance(tariff,dict):
+        info_reply=await request('GET',prefix+'site_info')
+        rate_reply=await request('GET',prefix+'tariff_rate')
+        info=info_reply.get('response') if isinstance(info_reply,dict) else None
+        rate_tariff=rate_reply.get('response') if isinstance(rate_reply,dict) else None
+        if not isinstance(info,dict):
             raise ValueError('readback_unavailable')
+        tariff,tariff_source=schema.select_installed_tariff(info,rate_tariff)
         digest=schema.semantic_hash(tariff)
         mode=info.get('default_real_mode')
         readable_modes=({'autonomous','self_consumption','backup'} if ACTION=='read'
@@ -103,6 +106,7 @@ async def main():
         }
         output={'live_last_success':datetime.now(timezone.utc).isoformat(),
             'energy_site_id':site,'mode':mode,'current_tariff_hash':digest,
+            'tariff_observation_source':tariff_source,
             'energy_commands_granted':'energy_cmds' in scopes,
             'preserve_settings':preserved,'command_sent':False}
         if ACTION in {'self_powered','savings'}:

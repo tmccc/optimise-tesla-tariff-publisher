@@ -4,7 +4,7 @@ from decimal import Decimal
 import unittest
 
 from tariff_schema import (TariffValidationError, canonical_hash, rate_at,
-                           semantic_hash, to_upload_tariff, validate_tariff)
+                           semantic_hash, select_installed_tariff, to_upload_tariff, validate_tariff)
 
 
 def period(start=0, end=0, first=0, last=6):
@@ -319,6 +319,56 @@ class SchemaTests(unittest.TestCase):
             value = tariff()
             value['version'] = bad
             self.assertIn('import.unsupported_version', validate_tariff(value))
+
+
+class InstalledTariffSelectionTests(unittest.TestCase):
+    def test_saved_flat_configuration_wins_over_stale_rate_projection(self):
+        old=tariff();saved=tariff();saved['energy_charges']['YEAR']['RATE']='.4'
+        selected,source=select_installed_tariff({'tariff_content':saved},old)
+        self.assertEqual(source,'site_info.tariff_content')
+        self.assertEqual(semantic_hash(selected),semantic_hash(saved))
+        self.assertNotEqual(semantic_hash(selected),semantic_hash(old))
+
+    def test_valid_flat_configuration_wins_over_malformed_v2(self):
+        saved=tariff()
+        selected,source=select_installed_tariff({'tariff_content':saved,
+            'tariff_content_v2':{'seasons':{'unsupported':'shape'}}},tariff())
+        self.assertEqual(source,'site_info.tariff_content');self.assertEqual(selected,saved)
+
+    def test_populated_invalid_flat_configuration_cannot_fall_back(self):
+        invalid=tariff();invalid['seasons']['YEAR']['tou_periods']['RATE']=[period(30,0)]
+        with self.assertRaises(TariffValidationError) as caught:
+            select_installed_tariff({'tariff_content':invalid,'tariff_content_v2':tariff()},tariff())
+        self.assertIn('installed_tariff_content_invalid',caught.exception.errors)
+        self.assertIn('import.tou_gap',caught.exception.errors)
+
+    def test_nonobject_present_configuration_is_not_treated_as_missing(self):
+        for invalid in (False,0,[],['value'],''):
+            with self.subTest(invalid=invalid),self.assertRaises(TariffValidationError):
+                select_installed_tariff({'tariff_content':invalid},tariff())
+
+    def test_v2_used_only_when_flat_is_absent(self):
+        wrapped=to_upload_tariff(tariff())
+        for absent in (None,{}):
+            selected,source=select_installed_tariff({'tariff_content':absent,'tariff_content_v2':wrapped},None)
+            self.assertEqual(source,'site_info.tariff_content_v2');self.assertEqual(selected,wrapped)
+        with self.assertRaises(TariffValidationError):
+            select_installed_tariff({'tariff_content_v2':{'invalid':'shape'}},tariff())
+
+    def test_rate_fallback_requires_valid_complete_structure(self):
+        selected,source=select_installed_tariff({},tariff())
+        self.assertEqual(source,'tariff_rate');self.assertEqual(selected,tariff())
+        for invalid in (None,{},False):
+            with self.assertRaises(TariffValidationError):select_installed_tariff({},invalid)
+        with self.assertRaises(TariffValidationError):select_installed_tariff(None,tariff())
+
+    def test_read_selection_does_not_mutate_or_grant_write_compatibility(self):
+        saved=tariff();saved['energy_charges']['YEAR']['RATE']='0'
+        self.assertEqual(validate_tariff(saved),['export_exceeds_import'])
+        selected,_source=select_installed_tariff({'tariff_content':saved},None)
+        self.assertEqual(validate_tariff(selected),['export_exceeds_import'])
+        selected['energy_charges']['YEAR']['RATE']='1'
+        self.assertEqual(saved['energy_charges']['YEAR']['RATE'],'0')
 
 
 if __name__ == '__main__':
