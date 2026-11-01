@@ -137,6 +137,12 @@ user-local release, virtual environment and configuration layout, startup after
 reboot, status checks and safe stopping order. These services expose no browser
 or management listener and do not require the Android emulator.
 
+Optional [Home Assistant alert setup notes](docs/home-assistant-alerts.md) and a
+[generic package example](examples/home-assistant-alerts.example.yaml) cover
+failed/stale price updates, observed Self-Powered mode and recovery messages.
+Adapt the source entities and existing notification service before installing;
+the publisher does not install these automations automatically.
+
 ## Important operational limits
 
 - Tesla's documented API adjusts negative prices and import prices below export
@@ -158,10 +164,12 @@ or management listener and do not require the Android emulator.
 - Source readings remain forecasts, not independently verified settlement or
   billing records. No VAT, margins or historical prices are invented.
 
-The original prototype was exercised in supervised testing. Offline tests cover
-the compiler, transports, recurring decisions and crash recovery. Validate the
-complete deployed setup against its real inputs before live use; these checks
-do not make this an unattended production controller.
+The configured native deployment has exercised paired-price publication, saved
+tariff readback, actual gateway mode, Self-Powered expiry fallback, recovery and
+automatic process restart. Boot enablement was checked without rebooting the
+host. Offline tests cover the compiler, transports, recurring decisions and
+crash recovery. These checks cover one installation; validate the complete setup
+against your own inputs before live use. This remains an experimental controller.
 
 ## Development and boundaries
 

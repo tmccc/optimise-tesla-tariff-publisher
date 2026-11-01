@@ -1,0 +1,241 @@
+# Optional Home Assistant PACKAGE example; read docs/home-assistant-alerts.md.
+# Replace notify.existing_alert_devices and the generic source entity IDs.
+# Assumes the Optimise integration's five-minute price update cadence.
+# Do not install alongside existing automations/helpers with these same IDs.
+# Omit helper initial values so incident state can restore after HA restart.
+# This example changes only notifications and its own incident helpers.
+
+input_boolean:
+  optimise_price_alert_active:
+    name: Optimise price alert active
+    icon: mdi:currency-gbp
+  optimise_self_powered_alert_active:
+    name: Optimise Self-Powered alert active
+    icon: mdi:battery-alert-variant-outline
+automation:
+- id: optimise_price_updates_monitor
+  alias: Optimise price updates failed and restored
+  description: Notify the existing shared alert devices once per incident and on verified recovery.
+    Restart-safe incident helper; no Powerwall control actions.
+  triggers:
+  - trigger: time_pattern
+    minutes: /1
+    id: poll
+  - trigger: homeassistant
+    event: start
+    id: startup
+  - trigger: state
+    entity_id:
+    - sensor.optimise_import_price
+    - sensor.optimise_export_price
+    - sensor.optimise_prices_last_successful_update
+    id: price_change
+  conditions: []
+  actions:
+  - choose:
+    - conditions:
+      - condition: template
+        value_template: '{{ trigger is defined and trigger.id == ''startup'' }}'
+      sequence:
+      - delay:
+          minutes: 2
+  - variables:
+      sample_time: '{{ as_timestamp(now()) }}'
+      price_samples:
+      - entity_id: sensor.optimise_import_price
+        value: '{{ states(''sensor.optimise_import_price'') }}'
+        changed_at: '{{ as_timestamp(states[''sensor.optimise_import_price''].last_changed, 0) if
+          states[''sensor.optimise_import_price''] is not none else 0 }}'
+      - entity_id: sensor.optimise_export_price
+        value: '{{ states(''sensor.optimise_export_price'') }}'
+        changed_at: '{{ as_timestamp(states[''sensor.optimise_export_price''].last_changed, 0) if
+          states[''sensor.optimise_export_price''] is not none else 0 }}'
+      - entity_id: sensor.optimise_prices_last_successful_update
+        value: '{{ states(''sensor.optimise_prices_last_successful_update'') }}'
+        changed_at: '{{ as_timestamp(states[''sensor.optimise_prices_last_successful_update''].last_changed,
+          0) if states[''sensor.optimise_prices_last_successful_update''] is not none else 0 }}'
+  - variables:
+      alert_problem: |-
+        {% set ns = namespace(failed=false) %}
+        {% for row in price_samples %}
+          {% set invalid = (as_timestamp(row.value, none) is none) if loop.last else (not is_number(row.value)) %}
+          {% if invalid and sample_time | float - row.changed_at | float >= 120 %}
+            {% set ns.failed = true %}
+          {% endif %}
+        {% endfor %}
+        {% set stamp = as_timestamp(price_samples[2].value, none) %}
+        {% set age = sample_time | float - stamp if stamp is not none else none %}
+        {{ ns.failed or (age is not none and age > 900)
+           or (age is not none and age < -60 and sample_time | float - price_samples[2].changed_at | float >= 120) }}
+      alert_healthy: |-
+        {% set stamp = as_timestamp(price_samples[2].value, none) %}
+        {% set age = sample_time | float - stamp if stamp is not none else none %}
+        {% set newest_change = price_samples | map(attribute='changed_at') | map('float') | max %}
+        {{ is_number(price_samples[0].value) and is_number(price_samples[1].value)
+           and age is not none and 0 <= age <= 900
+           and sample_time | float - newest_change >= 120 }}
+  - choose:
+    - conditions:
+      - condition: template
+        value_template: '{{ alert_problem | bool }}'
+      - condition: state
+        entity_id: input_boolean.optimise_price_alert_active
+        state: 'off'
+      sequence:
+      - action: notify.existing_alert_devices
+        data:
+          title: Optimise price updates failed
+          message: |-
+            Optimise import/export prices are unavailable or the last successful update is over 15 minutes old.
+            Import: {{ states('sensor.optimise_import_price') }} p/kWh.
+            Export: {{ states('sensor.optimise_export_price') }} p/kWh.
+            Last successful price update: {{ states('sensor.optimise_prices_last_successful_update') }}.
+            Check the Optimise integration and its connection. This alert does not change Powerwall controls.
+          data:
+            tag: optimise_price_updates
+      - action: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.optimise_price_alert_active
+      - action: persistent_notification.create
+        data:
+          notification_id: optimise_price_updates
+          title: Optimise price updates failed
+          message: |-
+            Optimise import/export prices are unavailable or the last successful update is over 15 minutes old.
+            Import: {{ states('sensor.optimise_import_price') }} p/kWh.
+            Export: {{ states('sensor.optimise_export_price') }} p/kWh.
+            Last successful price update: {{ states('sensor.optimise_prices_last_successful_update') }}.
+            Check the Optimise integration and its connection. This alert does not change Powerwall controls.
+    - conditions:
+      - condition: template
+        value_template: '{{ alert_healthy | bool }}'
+      - condition: state
+        entity_id: input_boolean.optimise_price_alert_active
+        state: 'on'
+      sequence:
+      - action: notify.existing_alert_devices
+        data:
+          title: Optimise price updates restored
+          message: |-
+            Optimise import/export prices have been healthy for two minutes.
+            Import: {{ states('sensor.optimise_import_price') }} p/kWh.
+            Export: {{ states('sensor.optimise_export_price') }} p/kWh.
+            Last successful update: {{ states('sensor.optimise_prices_last_successful_update') }}.
+          data:
+            tag: optimise_price_updates
+      - action: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.optimise_price_alert_active
+      - action: persistent_notification.dismiss
+        continue_on_error: true
+        data:
+          notification_id: optimise_price_updates
+  mode: single
+  max_exceeded: silent
+  trace:
+    stored_traces: 10
+- id: optimise_self_powered_monitor
+  alias: Optimise Powerwall Self-Powered mode alert
+  description: Notify the existing shared alert devices once per incident and on verified recovery.
+    Restart-safe incident helper; no Powerwall control actions.
+  triggers:
+  - trigger: time_pattern
+    minutes: /1
+    id: poll
+  - trigger: homeassistant
+    event: start
+    id: startup
+  - trigger: state
+    entity_id: sensor.powerwall_operating_mode
+    to: self_consumption
+    id: self_powered_entry
+  - trigger: state
+    entity_id: sensor.powerwall_operating_mode
+    from: self_consumption
+    id: mode_left
+  - trigger: state
+    entity_id: binary_sensor.powerwall_data_fresh
+    id: freshness_changed
+  conditions: []
+  actions:
+  - choose:
+    - conditions:
+      - condition: template
+        value_template: '{{ trigger is defined and trigger.id == ''startup'' }}'
+      sequence:
+      - delay:
+          minutes: 2
+  - variables:
+      sample_time: '{{ as_timestamp(now()) }}'
+      mode_sample:
+        mode: '{{ states(''sensor.powerwall_operating_mode'') }}'
+        fresh: '{{ states(''binary_sensor.powerwall_data_fresh'') }}'
+        mode_changed_at: '{{ as_timestamp(states[''sensor.powerwall_operating_mode''].last_changed,
+          0) if states[''sensor.powerwall_operating_mode''] is not none else 0 }}'
+        fresh_changed_at: '{{ as_timestamp(states[''binary_sensor.powerwall_data_fresh''].last_changed,
+          0) if states[''binary_sensor.powerwall_data_fresh''] is not none else 0 }}'
+      fresh_mode_entry: '{{ trigger is defined and trigger.id == ''self_powered_entry'' and trigger.from_state
+        is not none and trigger.from_state.state in [''autonomous'',''backup''] }}'
+  - variables:
+      alert_problem: |-
+        {{ mode_sample.fresh == 'on' and mode_sample.mode == 'self_consumption'
+           and (fresh_mode_entry | bool or
+                sample_time | float - [mode_sample.mode_changed_at | float, mode_sample.fresh_changed_at | float] | max >= 120) }}
+      alert_healthy: |-
+        {{ mode_sample.fresh == 'on' and mode_sample.mode in ['autonomous', 'backup']
+           and sample_time | float - [mode_sample.mode_changed_at | float, mode_sample.fresh_changed_at | float] | max >= 120 }}
+  - choose:
+    - conditions:
+      - condition: template
+        value_template: '{{ alert_problem | bool }}'
+      - condition: state
+        entity_id: input_boolean.optimise_self_powered_alert_active
+        state: 'off'
+      sequence:
+      - action: notify.existing_alert_devices
+        data:
+          title: Powerwall is Self-Powered
+          message: |-
+            The local gateway reports that Powerwall is in Self-Powered mode.
+            This may be a deliberate change or the tariff publisher's safety fallback.
+            Check whether the change was expected and whether Optimise prices are updating.
+          data:
+            tag: optimise_self_powered
+      - action: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.optimise_self_powered_alert_active
+      - action: persistent_notification.create
+        data:
+          notification_id: optimise_self_powered
+          title: Powerwall is Self-Powered
+          message: |-
+            The local gateway reports that Powerwall is in Self-Powered mode.
+            This may be a deliberate change or the tariff publisher's safety fallback.
+            Check whether the change was expected and whether Optimise prices are updating.
+    - conditions:
+      - condition: template
+        value_template: '{{ alert_healthy | bool }}'
+      - condition: state
+        entity_id: input_boolean.optimise_self_powered_alert_active
+        state: 'on'
+      sequence:
+      - action: notify.existing_alert_devices
+        data:
+          title: Powerwall has left Self-Powered mode
+          message: |-
+            Powerwall has left Self-Powered mode. The local gateway has reported
+            {{ {'autonomous':'Savings (Time-Based Control)', 'backup':'Backup'}.get(states('sensor.powerwall_operating_mode'), states('sensor.powerwall_operating_mode')) }}
+            with fresh telemetry for two minutes.
+          data:
+            tag: optimise_self_powered
+      - action: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.optimise_self_powered_alert_active
+      - action: persistent_notification.dismiss
+        continue_on_error: true
+        data:
+          notification_id: optimise_self_powered
+  mode: single
+  max_exceeded: silent
+  trace:
+    stored_traces: 10
