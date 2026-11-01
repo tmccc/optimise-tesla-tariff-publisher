@@ -32,7 +32,7 @@ def load_coordinator():
 class RecurringCoordinatorTests(unittest.TestCase):
     def setUp(self):
         self.module=load_coordinator()
-        directory=tempfile.TemporaryDirectory(dir='/home/tonym/codex')
+        directory=tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.root=Path(directory.name);self.output=self.root/'output';self.output.mkdir()
         self.clock=NOW;self.posts=[];self.target=NEW;self.snapshots=[]
