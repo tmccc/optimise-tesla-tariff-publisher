@@ -1,0 +1,20 @@
+# Path-only configuration. Replace /home/USERNAME with your absolute home path.
+# Systemd EnvironmentFile does not expand $HOME or shell variables.
+# Put actual token values in the separate private files, never in this file.
+OPTIMISE_TESLA_STATE_DIR=/home/USERNAME/.local/state/optimise-tesla-tariff-publisher
+HASS_URL=http://127.0.0.1:8123
+HASS_TOKEN_FILE=/home/USERNAME/.config/optimise-tesla-tariff-publisher/ha-token
+TESSIE_TOKEN_FILE=/home/USERNAME/.config/optimise-tesla-tariff-publisher/tessie-token
+# Keep this outside output/: prepare.py must initialise its own output marker.
+TESSIE_SCOPE_CACHE_FILE=/home/USERNAME/.local/state/optimise-tesla-tariff-publisher/tessie-scope-cache.json
+HASS_IMPORT_PRICE_ENTITY=sensor.optimise_import_price
+HASS_EXPORT_PRICE_ENTITY=sensor.optimise_export_price
+HASS_PRICES_LAST_SUCCESS_ENTITY=sensor.optimise_prices_last_successful_update
+HASS_BATTERY_ENROLLED_ENTITY=binary_sensor.optimise_battery_enrolled
+HASS_STATUS_LAST_SUCCESS_ENTITY=sensor.optimise_status_last_successful_update
+# The operator pins the one eligible battery energy site after read-only discovery.
+# TESLA_ENERGY_SITE_ID=REPLACE_WITH_A_POSITIVE_INTEGER
+# Permits refreshing the Optimise enrolment telemetry immediately before commands.
+HASS_ALLOW_STATUS_REFRESH=1
+PYTHONDONTWRITEBYTECODE=1
+PYTHONUNBUFFERED=1

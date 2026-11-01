@@ -13,6 +13,17 @@ It includes an optional recurring publisher, an independent watchdog and user
 service templates for startup after reboot. Installing the code starts nothing;
 live execution and design approvals default to **off**.
 
+**Experimental technical preview:** tariff publication, actual gateway mode,
+fallback and restart recovery have been exercised on one installation. Effective
+planning-engine tariff consumption, sustained automatic export and bill savings
+have not been independently established. See the
+[readback evidence and limits](docs/tesla-tariff-readback-evidence.md).
+
+For a fresh deployment, follow the
+[installation walkthrough](docs/installation.md), starting with read-only checks.
+The first tagged prerelease is [**v0.1.0a1**](docs/releases/v0.1.0a1.md); it is intended for technically
+experienced testers. The separate HACS integration has its own version numbers.
+
 ## Start with the offline example
 
 Use Python 3.11 or newer on Linux/POSIX. The offline compiler and tests use the
