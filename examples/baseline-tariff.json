@@ -1,0 +1,85 @@
+{
+  "currency": "GBP",
+  "utility": "Example Energy",
+  "code": "SYNTHETIC_EXAMPLE",
+  "name": "Synthetic baseline",
+  "demand_charges": {
+    "ALL": {
+      "rates": {
+        "ALL": 0
+      }
+    }
+  },
+  "energy_charges": {
+    "Annual": {
+      "rates": {
+        "OFF_PEAK": 0.3
+      }
+    }
+  },
+  "seasons": {
+    "Annual": {
+      "fromMonth": 1,
+      "fromDay": 1,
+      "toMonth": 12,
+      "toDay": 31,
+      "tou_periods": {
+        "OFF_PEAK": {
+          "periods": [
+            {
+              "fromDayOfWeek": 0,
+              "toDayOfWeek": 6,
+              "fromHour": 0,
+              "fromMinute": 0,
+              "toHour": 0,
+              "toMinute": 0
+            }
+          ]
+        }
+      }
+    }
+  },
+  "version": 1,
+  "sell_tariff": {
+    "currency": "GBP",
+    "utility": "Example Energy",
+    "code": "SYNTHETIC_EXAMPLE",
+    "name": "Synthetic baseline",
+    "demand_charges": {
+      "ALL": {
+        "rates": {
+          "ALL": 0
+        }
+      }
+    },
+    "energy_charges": {
+      "Annual": {
+        "rates": {
+          "OFF_PEAK": 0.1
+        }
+      }
+    },
+    "seasons": {
+      "Annual": {
+        "fromMonth": 1,
+        "fromDay": 1,
+        "toMonth": 12,
+        "toDay": 31,
+        "tou_periods": {
+          "OFF_PEAK": {
+            "periods": [
+              {
+                "fromDayOfWeek": 0,
+                "toDayOfWeek": 6,
+                "fromHour": 0,
+                "fromMinute": 0,
+                "toHour": 0,
+                "toMinute": 0
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

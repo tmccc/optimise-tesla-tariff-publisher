@@ -1,0 +1,11 @@
+{
+  "fallback_design_approved": false,
+  "unquoted_policy": "frozen_current_quote",
+  "unquoted_planning_assumption_approved": false,
+  "live_execution_enabled": false,
+  "allowed_mode": "self_consumption",
+  "allow_tariff_writes": false,
+  "preserve_backup_reserve": true,
+  "preserve_grid_and_export_permissions": true,
+  "preserve_amber_authorisation": true
+}
