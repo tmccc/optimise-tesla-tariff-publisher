@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from auth import secret_reader_source
 from reply_metadata import reply_metadata_source
+from scope_cache import scope_cache_source
 from runtime import REMOTE
 from tariff_schema import semantic_hash
 
@@ -23,7 +24,7 @@ class ModeTransportTests(unittest.TestCase):
     def run_child(self, *, action='self_powered', cloud_mode='autonomous',
                   reply=None, post_status=200, changed_settings=False, proceed=True,
                   allow_child_failure=False, saved_configuration=False, invalid_configuration=False,
-                  invalid_rate=False):
+                  invalid_rate=False, enable_scope_cache=False, runs=1):
         period={'fromDayOfWeek':0,'toDayOfWeek':6,'fromHour':0,'fromMinute':0,
                 'toHour':0,'toMinute':0}
         channel={'currency':'GBP','energy_charges':{'Y':{'R':.3}},
@@ -77,6 +78,7 @@ class ModeTransportTests(unittest.TestCase):
         module.ClientTimeout=lambda **kwargs:kwargs
         namespace={'SCHEMA_SOURCE':(Path(__file__).resolve().parents[1]/'tariff_schema.py').read_text(),
             'AUTH_SOURCE':secret_reader_source(),'REPLY_METADATA_SOURCE':reply_metadata_source(),
+            'SCOPE_CACHE_SOURCE':scope_cache_source(),
             'ACTION':action,'EXPECTED':expected,'LIVE_AUTHORIZED':True}
         stdin=io.StringIO(json.dumps({'proceed':proceed,
             'valid_until':(datetime.now(UTC)+timedelta(seconds=4)).isoformat()})+'\n')
@@ -85,10 +87,11 @@ class ModeTransportTests(unittest.TestCase):
             token=Path(directory)/'explicit-synthetic-token'
             token.write_text('SYNTHETIC_AUTH_MUST_NOT_APPEAR');token.chmod(0o600)
             with patch.dict('sys.modules',{'aiohttp':module}),\
-                patch.dict(os.environ,{'TESSIE_TOKEN_FILE':str(token)}),\
+                patch.dict(os.environ,{'TESSIE_TOKEN_FILE':str(token),
+                    'TESSIE_SCOPE_CACHE_FILE':str(Path(directory)/'cache/scopes.json') if enable_scope_cache else ''}),\
                 patch('sys.stdin',stdin),contextlib.redirect_stdout(stdout):
                 try:
-                    exec(REMOTE,namespace)
+                    for _ in range(runs):exec(REMOTE,namespace)
                 except SystemExit as failure:
                     if not allow_child_failure or failure.code != 1:
                         raise
@@ -164,3 +167,11 @@ class ModeTransportTests(unittest.TestCase):
         replies,calls=self.run_child(action='read',saved_configuration=True,invalid_rate=True)
         self.assertEqual(replies[-1]['tariff_observation_source'],'site_info.tariff_content')
         self.assertFalse(replies[-1]['command_sent']);self.assertEqual(len(calls),4)
+
+    def test_native_reads_share_permission_cache_but_refresh_all_other_observations(self):
+        replies,calls=self.run_child(action='read',enable_scope_cache=True,runs=2)
+        self.assertEqual(len(replies),2)
+        self.assertEqual(sum(path=='/auth/tesla_scopes' for _,path,_ in calls),1)
+        for suffix in ('/products','/site_info','/tariff_rate'):
+            self.assertEqual(sum(path.endswith(suffix) for _,path,_ in calls),2)
+        self.assertFalse(any(method=='POST' for method,_,_ in calls))

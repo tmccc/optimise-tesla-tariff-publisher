@@ -20,6 +20,7 @@ from active_mode import read_active_mode
 from auth import secret_reader_source
 from config import ROOT, STATE_DIR, task_env
 from reply_metadata import reply_metadata_source
+from scope_cache import scope_cache_source
 
 POLICY=STATE_DIR/'execution-policy.json'
 
@@ -37,9 +38,12 @@ sys.modules[schema.__name__]=schema
 exec(SCHEMA_SOURCE,schema.__dict__)
 exec(AUTH_SOURCE,globals())
 exec(REPLY_METADATA_SOURCE,globals())
+exec(SCOPE_CACHE_SOURCE,globals())
 
 async def main():
+    token_identity=scope_token_identity()
     token=read_secret_file('TESSIE_TOKEN_FILE')
+    if scope_token_identity()!=token_identity:raise ValueError('token_file_changed')
     allowed={'/auth/tesla_scopes','/api/1/products'}
     async with aiohttp.ClientSession(trust_env=False,
         timeout=aiohttp.ClientTimeout(total=20)) as session:
@@ -51,6 +55,8 @@ async def main():
                 and LIVE_AUTHORIZED is True and path.endswith('/operation')
                 and body=={'default_real_mode':target}):
                 raise ValueError('mutation_denied')
+            if method=='POST' and scope_token_identity()!=token_identity:
+                raise ValueError('token_file_changed')
             if method=='POST':CONTROL_ATTEMPTED=True
             async with session.request(method,'https://api.tessie.com'+path,
                 headers={'Authorization':'Bearer '+token},json=body,
@@ -66,7 +72,8 @@ async def main():
                     raise ValueError('endpoint_response_unavailable')
                 if method=='POST':POST_COMPLETED_AT=datetime.now(timezone.utc).isoformat()
                 return json.loads(b''.join(pieces))
-        scopes_reply=await request('GET','/auth/tesla_scopes')
+        scopes_reply=await cached_scope_reply_async(lambda:request('GET','/auth/tesla_scopes'),
+            expected_token_identity=token_identity)
         scopes=scopes_reply.get('scopes')
         if not isinstance(scopes,list) or any(not isinstance(x,str) for x in scopes):
             raise ValueError('scope_read_failed')
@@ -214,6 +221,7 @@ class FallbackAdapter:
         source=('SCHEMA_SOURCE='+repr((ROOT/'tariff_schema.py').read_text())+'\n'
             +'AUTH_SOURCE='+repr(secret_reader_source())+'\n'
             +'REPLY_METADATA_SOURCE='+repr(reply_metadata_source())+'\n'
+            +'SCOPE_CACHE_SOURCE='+repr(scope_cache_source())+'\n'
             +'ACTION='+repr(action)+'\nEXPECTED='+repr(expected)+'\n'
             +'LIVE_AUTHORIZED='+repr(live_authorized)+'\n'+REMOTE)
         env=task_env()

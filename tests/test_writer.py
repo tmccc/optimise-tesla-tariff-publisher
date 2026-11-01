@@ -16,6 +16,7 @@ from tariff_schema import semantic_hash
 from writer import REMOTE, TariffWriter, publisher_policy_enabled, validate_candidate
 from auth import secret_reader_source
 from reply_metadata import reply_metadata_source
+from scope_cache import scope_cache_source
 
 UTC=timezone.utc
 NOW=datetime(2026,11,1,12,5,tzinfo=UTC)
@@ -353,6 +354,7 @@ class WriterTests(unittest.TestCase):
         namespace={'SCHEMA_SOURCE':(Path(__file__).resolve().parents[1]/'tariff_schema.py').read_text(),
             'AUTH_SOURCE':secret_reader_source(),
             'REPLY_METADATA_SOURCE':reply_metadata_source(),
+            'SCOPE_CACHE_SOURCE':scope_cache_source(),
             'CANDIDATE':candidate,'EXPECTED':expected,'LIVE_AUTHORIZED':True}
         stdin=io.StringIO(json.dumps({'proceed':True,'valid_until':
             (datetime.now(UTC)+timedelta(seconds=4)).isoformat()})+'\n')
@@ -360,7 +362,8 @@ class WriterTests(unittest.TestCase):
         # Authentication reads only this synthetic explicit0600 token file.
         # HTTP is entirely in-memory, so no network socket exists.
         with patch.dict('sys.modules',{'aiohttp':fake_aiohttp}),\
-            patch.dict(os.environ,{'TESSIE_TOKEN_FILE':str(token_path) if token_configured else ''}),\
+            patch.dict(os.environ,{'TESSIE_TOKEN_FILE':str(token_path) if token_configured else '',
+                'TESSIE_SCOPE_CACHE_FILE':''}),\
             patch('sys.stdin',stdin),contextlib.redirect_stdout(stdout):
             exec(REMOTE,namespace)
         values=[json.loads(line) for line in stdout.getvalue().splitlines()]

@@ -23,6 +23,7 @@ from auth import secret_reader_source
 from config import ROOT, STATE_DIR, task_env
 from tariff_schema import semantic_hash, to_upload_tariff, validate_tariff
 from reply_metadata import reply_metadata_source
+from scope_cache import scope_cache_source
 
 UTC = timezone.utc
 PUBLISHER_POLICY = STATE_DIR / 'publisher-policy.json'
@@ -137,13 +138,16 @@ sys.modules[schema.__name__]=schema
 exec(SCHEMA_SOURCE,schema.__dict__)
 exec(AUTH_SOURCE,globals())
 exec(REPLY_METADATA_SOURCE,globals())
+exec(SCOPE_CACHE_SOURCE,globals())
 
 async def main():
     if LIVE_AUTHORIZED is not True or schema.validate_tariff(CANDIDATE):
         return {'command_sent':False,'reason':'remote_validation_failed'}
     if schema.semantic_hash(CANDIDATE)!=EXPECTED.get('candidate_tariff_hash'):
         return {'command_sent':False,'reason':'remote_candidate_hash_mismatch'}
+    token_identity=scope_token_identity()
     token=read_secret_file('TESSIE_TOKEN_FILE')
+    if scope_token_identity()!=token_identity:raise ValueError('token_file_changed')
     allowed={'/auth/tesla_scopes','/api/1/products'}
     async with aiohttp.ClientSession(trust_env=False,
         timeout=aiohttp.ClientTimeout(total=20)) as session:
@@ -154,6 +158,8 @@ async def main():
                 and LIVE_AUTHORIZED is True
                 and body=={'tou_settings':{'tariff_content_v2':CANDIDATE}}):
                 raise ValueError('mutation_denied')
+            if method=='POST' and scope_token_identity()!=token_identity:
+                raise ValueError('token_file_changed')
             if method=='POST':ATTEMPTED=True
             async with session.request(method,'https://api.tessie.com'+path,
                 headers={'Authorization':'Bearer '+token},json=body,
@@ -169,7 +175,8 @@ async def main():
                     raise ValueError('response_unavailable')
                 if method=='POST':POST_COMPLETED_AT=datetime.now(timezone.utc).isoformat()
                 return json.loads(b''.join(pieces))
-        scopes_reply=await request('GET','/auth/tesla_scopes')
+        scopes_reply=await cached_scope_reply_async(lambda:request('GET','/auth/tesla_scopes'),
+            expected_token_identity=token_identity)
         scopes=scopes_reply.get('scopes') if isinstance(scopes_reply,dict) else None
         if not isinstance(scopes,list) or any(not isinstance(x,str) for x in scopes):
             raise ValueError('scope_read_failed')
@@ -323,6 +330,7 @@ class TariffWriter:
         source = ('SCHEMA_SOURCE=' + repr((ROOT/'tariff_schema.py').read_text()) + '\n'
             + 'AUTH_SOURCE=' + repr(secret_reader_source()) + '\n'
             + 'REPLY_METADATA_SOURCE=' + repr(reply_metadata_source()) + '\n'
+            + 'SCOPE_CACHE_SOURCE=' + repr(scope_cache_source()) + '\n'
             + 'CANDIDATE=' + repr(context['candidate']) + '\n'
             + 'EXPECTED=' + repr(expected) + '\nLIVE_AUTHORIZED=True\n' + REMOTE)
         wrapper = 'import json,sys;exec(json.loads(sys.stdin.readline()))'

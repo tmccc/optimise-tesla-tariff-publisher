@@ -71,10 +71,17 @@ Git, screenshots or issue reports:
 | `TESSIE_TOKEN_FILE` | Explicit Tessie token file |
 | `TESLA_ENERGY_SITE_ID` | Optional explicit site selection for readback; live commands also require pinned site IDs |
 | `HASS_ALLOW_STATUS_REFRESH` | Set to `1` only to permit the explicit enrolment-telemetry refresh |
+| `TESSIE_SCOPE_CACHE_FILE` | Optional absolute private cache path for energy-permission evidence; expires after 300 seconds |
 
 Token files must be regular, owned by the current user, mode `0600`, and not
 symbolic links. Examples include paths only. Authentication values stay inside
 the processes making the requests and are not returned in diagnostics.
+
+Recurring deployments should configure the permission cache to avoid repeating
+the permission lookup for every preflight and readback. It stores only two known
+energy permission names, an observation time and token-file identity; changing
+the token invalidates it. Expired evidence is never reused after a failed fetch.
+Tariffs, protected settings, gateway mode and enrolment are still read fresh.
 
 Configure the HA entity mapping for your installation:
 

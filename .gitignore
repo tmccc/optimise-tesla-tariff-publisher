@@ -31,6 +31,7 @@ recurring-journal.json
 mode-intent*.json
 tariff-pending.json
 watchdog-health.json
+tessie-scope-cache.json
 *-receipt.json
 *-readback.json
 *-token.txt

@@ -9,6 +9,7 @@ from urllib import request
 
 from active_mode import read_active_mode
 from auth import read_secret_file
+from scope_cache import cached_scope_reply
 from tariff_schema import canonical_hash, validate_tariff, select_installed_tariff
 
 MAX_RESPONSE = 2 * 1024 * 1024
@@ -20,6 +21,12 @@ class _NoRedirect(request.HTTPRedirectHandler):
 
 
 def _get(path):
+    if path == 'auth/tesla_scopes':
+        return cached_scope_reply(lambda: _uncached_get(path))
+    return _uncached_get(path)
+
+
+def _uncached_get(path):
     if path not in ('auth/tesla_scopes', 'api/1/products') and not re.fullmatch(
         r'api/1/energy_sites/[1-9][0-9]*/(?:site_info|tariff_rate)',path):
         raise ValueError('tessie_read_endpoint_denied')
