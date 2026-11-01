@@ -2,6 +2,7 @@
   "live_execution_enabled": false,
   "allow_tariff_writes": false,
   "one_shot_only": true,
+  "recurring_enabled": false,
   "unquoted_policy": "frozen_current_quote",
   "unquoted_planning_assumption_approved": false,
   "fallback_design_approved": false,

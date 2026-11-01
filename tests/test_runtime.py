@@ -170,5 +170,170 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("read_secret_file('TESSIE_TOKEN_FILE')",source)
         self.assertEqual(running.call_args.kwargs['env']['TESSIE_TOKEN_FILE'],str(token))
 
+    def savings_adapter(self):
+        """Explicitly armed synthetic Savings path with a fresh private lease."""
+        self.arm_fake_policy();policy=private_document(self.policy)
+        policy.update(recurring_enabled=True,allow_savings_enable=True,energy_site_id=123)
+        self.write(self.policy,policy)
+        now=datetime.now(UTC)
+        lease=private_document(self.lease)
+        lease.update(guard_lease_until=(now+timedelta(minutes=2)).isoformat(),
+            source_last_success=now.isoformat(),source_captured_at=now.isoformat(),
+            known_valid_from=(now-timedelta(minutes=1)).isoformat(),
+            known_valid_until=(now+timedelta(hours=1)).isoformat())
+        self.write(self.lease,lease)
+        self.snapshot['mode']='self_consumption'
+        adapter=self.adapter();adapter.mode_authorizer=lambda context:True
+        def transport(action,expected,authorized):
+            self.calls.append((action,authorized))
+            if action=='read':return deepcopy(self.snapshot)
+            if not adapter._confirm_remote_preflight(expected):
+                return {'command_sent':False,'preflight_verified':False}
+            return {'command_sent':True,'preflight_verified':True,'requested_mode':'autonomous'}
+        adapter.transport=transport
+        return adapter
+
+    def test_savings_is_not_granted_by_existing_fallback_policy(self):
+        self.arm_fake_policy()
+        result=self.adapter().set_savings(expected_tariff_hash=HASH,preserve_settings=KEEP)
+        self.assertEqual(result['reason'],'savings_execution_disabled')
+        self.assertEqual(self.calls,[])
+
+    def test_savings_requires_live_owned_prices_and_final_authorizer(self):
+        adapter=self.savings_adapter();adapter.mode_authorizer=None
+        self.assertEqual(adapter.set_savings(expected_tariff_hash=HASH,
+            preserve_settings=KEEP)['reason'],'mode_authorizer_required')
+        self.assertEqual(self.calls,[])
+
+    def test_owned_fresh_savings_enable_sends_only_fixed_action(self):
+        adapter=self.savings_adapter()
+        result=adapter.set_savings(expected_tariff_hash=HASH,preserve_settings=KEEP)
+        self.assertTrue(result['command_sent'])
+        self.assertEqual(result['requested_mode'],'autonomous')
+        self.assertEqual(self.calls,[('read',False),('savings',True)])
+
+    def test_savings_does_not_accept_expired_or_overlong_lease(self):
+        adapter=self.savings_adapter()
+        for minutes in (-1,6):
+            lease=private_document(self.lease)
+            lease['guard_lease_until']=(datetime.now(UTC)+timedelta(minutes=minutes)).isoformat()
+            self.write(self.lease,lease);self.calls.clear()
+            result=adapter.set_savings(expected_tariff_hash=HASH,preserve_settings=KEEP)
+            self.assertEqual(result['reason'],'trusted_live_lease_required')
+            self.assertEqual(self.calls,[])
+
+    def test_savings_stale_source_is_rejected_before_network(self):
+        adapter=self.savings_adapter();lease=private_document(self.lease)
+        lease['source_last_success']=(datetime.now(UTC)-timedelta(minutes=16)).isoformat()
+        self.write(self.lease,lease)
+        self.assertFalse(adapter.set_savings(expected_tariff_hash=HASH,preserve_settings=KEEP)['command_sent'])
+        self.assertEqual(self.calls,[])
+
+    def test_savings_eon_activation_or_ownership_drift_never_dispatches(self):
+        adapter=self.savings_adapter()
+        self.enrollment['battery_enrolled']=True
+        self.assertFalse(adapter.set_savings(expected_tariff_hash=HASH,preserve_settings=KEEP)['command_sent'])
+        self.assertEqual(self.calls,[('read',False)])
+
+    def test_savings_final_health_rejection_prevents_go(self):
+        adapter=self.savings_adapter();adapter.mode_authorizer=lambda context:False
+        self.assertFalse(adapter.set_savings(expected_tariff_hash=HASH,preserve_settings=KEEP)['command_sent'])
+        self.assertEqual(self.calls,[('read',False),('savings',True)])
+
+    def test_savings_rechecks_policy_after_final_authorizer(self):
+        adapter=self.savings_adapter()
+        def revoke(context):
+            policy=private_document(self.policy);policy['allow_savings_enable']=False
+            self.write(self.policy,policy);return True
+        adapter.mode_authorizer=revoke
+        self.assertFalse(adapter.set_savings(expected_tariff_hash=HASH,preserve_settings=KEEP)['command_sent'])
+
+    def test_savings_rechecks_lease_after_final_authorizer(self):
+        adapter=self.savings_adapter()
+        def change(context):
+            lease=private_document(self.lease);lease['new_publisher_generation']='new'
+            self.write(self.lease,lease);return True
+        adapter.mode_authorizer=change
+        self.assertFalse(adapter.set_savings(expected_tariff_hash=HASH,preserve_settings=KEEP)['command_sent'])
+
+    def test_savings_uses_actual_mode_instead_of_lagging_cloud_default(self):
+        adapter=self.savings_adapter()
+        self.snapshot['mode']='autonomous'  # Saved cloud value can lag actual state.
+        adapter.active_mode_reader=lambda:{'mode':'self_consumption','mode_source':'fake_local_gateway'}
+        result=adapter.set_savings(expected_tariff_hash=HASH,preserve_settings=KEEP)
+        self.assertTrue(result['command_sent'])
+
+    def test_savings_nested_orchestrator_lock_does_not_deadlock(self):
+        adapter=self.savings_adapter()
+        descriptor=os.open(adapter.lock_path,os.O_WRONLY|os.O_CREAT,0o600)
+        try:
+            import fcntl
+            fcntl.flock(descriptor,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            self.assertTrue(adapter.set_savings(expected_tariff_hash=HASH,
+                preserve_settings=KEEP,lock_held=True)['command_sent'])
+        finally:os.close(descriptor)
+
+    def test_savings_records_dispatch_intent_after_authorization(self):
+        adapter=self.savings_adapter();order=[];recorded=[]
+        adapter.mode_authorizer=lambda context:order.append('authorized') or True
+        def record(context):
+            order.append('recorded');recorded.append(context);return True
+        adapter.mode_attempt_recorder=record
+        self.assertTrue(adapter.set_savings(expected_tariff_hash=HASH,preserve_settings=KEEP)['command_sent'])
+        self.assertEqual(order,['authorized','recorded'])
+        self.assertEqual(recorded[0]['action'],'enable_savings')
+        self.assertEqual(recorded[0]['target_mode'],'autonomous')
+        self.assertEqual(recorded[0]['from_mode'],'self_consumption')
+        self.assertEqual(recorded[0]['energy_site_id'],123)
+        self.assertEqual(recorded[0]['current_tariff_hash'],HASH)
+        self.assertEqual(recorded[0]['preserve_settings'],KEEP)
+        self.assertIs(recorded[0]['battery_enrolled'],False)
+
+    def test_failed_mode_intent_write_blocks_savings(self):
+        adapter=self.savings_adapter()
+        def failed(context):raise OSError('synthetic journal fsync failure')
+        for recorder in (lambda context:False,failed):
+            adapter.mode_attempt_recorder=recorder
+            self.assertFalse(adapter.set_savings(expected_tariff_hash=HASH,preserve_settings=KEEP)['command_sent'])
+
+    def test_savings_rechecks_policy_after_dispatch_intent_write(self):
+        adapter=self.savings_adapter()
+        def record(context):
+            policy=private_document(self.policy);policy['allow_savings_enable']=False
+            self.write(self.policy,policy);return True
+        adapter.mode_attempt_recorder=record
+        self.assertFalse(adapter.set_savings(expected_tariff_hash=HASH,preserve_settings=KEEP)['command_sent'])
+
+    def test_fallback_records_intent_and_aborts_on_journal_failure(self):
+        self.arm_fake_policy();adapter=self.adapter();recorded=[]
+        adapter._pending_lease=private_document(self.lease)
+        adapter.mode_attempt_recorder=lambda context:recorded.append(context) or True
+        self.assertTrue(adapter._confirm_remote_preflight(self.snapshot))
+        self.assertEqual(recorded[0]['action'],'fallback')
+        self.assertEqual(recorded[0]['target_mode'],'self_consumption')
+        self.assertEqual(recorded[0]['from_mode'],'autonomous')
+        adapter.mode_attempt_recorder=lambda context:False
+        self.assertFalse(adapter._confirm_remote_preflight(self.snapshot))
+
+    def test_fallback_rechecks_lease_after_dispatch_intent_write(self):
+        self.arm_fake_policy();adapter=self.adapter()
+        adapter._pending_lease=private_document(self.lease)
+        def record(context):
+            lease=private_document(self.lease)
+            lease['guard_lease_until']=(datetime.now(UTC)+timedelta(minutes=1)).isoformat()
+            self.write(self.lease,lease);return True
+        adapter.mode_attempt_recorder=record
+        self.assertFalse(adapter._confirm_remote_preflight(self.snapshot))
+
+    def test_fallback_accepts_outer_control_lock_without_nested_acquisition(self):
+        self.arm_fake_policy();adapter=self.adapter()
+        descriptor=os.open(adapter.lock_path,os.O_WRONLY|os.O_CREAT,0o600)
+        try:
+            import fcntl
+            fcntl.flock(descriptor,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            self.assertTrue(adapter.set_self_powered(expected_tariff_hash=HASH,
+                preserve_settings=KEEP,lock_held=True)['command_sent'])
+        finally:os.close(descriptor)
+
 
 if __name__=='__main__':unittest.main()

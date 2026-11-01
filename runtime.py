@@ -6,7 +6,7 @@ policy is disabled for this preparation task. There is no tariff-upload route.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import fcntl
 import json
 import os
@@ -19,6 +19,7 @@ import sys
 from active_mode import read_active_mode
 from auth import secret_reader_source
 from config import ROOT, STATE_DIR, task_env
+from reply_metadata import reply_metadata_source
 
 POLICY=STATE_DIR/'execution-policy.json'
 
@@ -29,10 +30,13 @@ from pathlib import Path
 import aiohttp
 logging.disable(logging.CRITICAL)
 CONTROL_ATTEMPTED=False
+POST_STATUS=None
+POST_COMPLETED_AT=None
 schema=types.ModuleType('_fallback_tariff_schema')
 sys.modules[schema.__name__]=schema
 exec(SCHEMA_SOURCE,schema.__dict__)
 exec(AUTH_SOURCE,globals())
+exec(REPLY_METADATA_SOURCE,globals())
 
 async def main():
     token=read_secret_file('TESSIE_TOKEN_FILE')
@@ -40,23 +44,27 @@ async def main():
     async with aiohttp.ClientSession(trust_env=False,
         timeout=aiohttp.ClientTimeout(total=20)) as session:
         async def request(method,path,body=None):
-            global CONTROL_ATTEMPTED
+            global CONTROL_ATTEMPTED,POST_STATUS,POST_COMPLETED_AT
             if path not in allowed:raise ValueError('endpoint_denied')
-            if method!='GET' and not (method=='POST' and ACTION=='self_powered'
+            target={'self_powered':'self_consumption','savings':'autonomous'}.get(ACTION)
+            if method!='GET' and not (method=='POST' and target is not None
                 and LIVE_AUTHORIZED is True and path.endswith('/operation')
-                and body=={'default_real_mode':'self_consumption'}):
+                and body=={'default_real_mode':target}):
                 raise ValueError('mutation_denied')
             if method=='POST':CONTROL_ATTEMPTED=True
             async with session.request(method,'https://api.tessie.com'+path,
                 headers={'Authorization':'Bearer '+token},json=body,
                 allow_redirects=False) as response:
+                if method=='POST':POST_STATUS=response.status
                 pieces=[];size=0
                 while size<=2*1024*1024:
                     piece=await response.content.read(min(65536,2*1024*1024+1-size))
                     if not piece:break
                     pieces.append(piece);size+=len(piece)
                 if response.status!=200 or size>2*1024*1024:
+                    if method=='POST':POST_COMPLETED_AT=datetime.now(timezone.utc).isoformat()
                     raise ValueError('endpoint_response_unavailable')
+                if method=='POST':POST_COMPLETED_AT=datetime.now(timezone.utc).isoformat()
                 return json.loads(b''.join(pieces))
         scopes_reply=await request('GET','/auth/tesla_scopes')
         scopes=scopes_reply.get('scopes')
@@ -78,7 +86,9 @@ async def main():
             raise ValueError('readback_unavailable')
         digest=schema.semantic_hash(tariff)
         mode=info.get('default_real_mode')
-        if mode not in {'autonomous','self_consumption'}:raise ValueError('mode_unknown')
+        readable_modes=({'autonomous','self_consumption','backup'} if ACTION=='read'
+            else {'autonomous','self_consumption'})
+        if mode not in readable_modes:raise ValueError('mode_unknown')
         components=info.get('components',{})
         if not isinstance(components,dict):components={}
         reserve=info.get('backup_reserve_percent')
@@ -95,9 +105,9 @@ async def main():
             'energy_site_id':site,'mode':mode,'current_tariff_hash':digest,
             'energy_commands_granted':'energy_cmds' in scopes,
             'preserve_settings':preserved,'command_sent':False}
-        if ACTION=='self_powered':
+        if ACTION in {'self_powered','savings'}:
             if LIVE_AUTHORIZED is not True:raise ValueError('live_execution_disabled')
-            if (site!=EXPECTED.get('energy_site_id') or mode!='autonomous'
+            if (site!=EXPECTED.get('energy_site_id')
                 or digest!=EXPECTED.get('current_tariff_hash')
                 or preserved!=EXPECTED.get('preserve_settings')
                 or any(x is None for x in preserved.values())
@@ -114,17 +124,23 @@ async def main():
                 return {'command_sent':False,'preflight_verified':False}
             allowed.add(prefix+'operation')
             # Exactly one mode field; no reserve, grid/export or tariff writes.
-            reply=await request('POST',prefix+'operation',{'default_real_mode':'self_consumption'})
+            requested_mode={'self_powered':'self_consumption','savings':'autonomous'}[ACTION]
+            reply=await request('POST',prefix+'operation',{'default_real_mode':requested_mode})
             result=reply.get('response',{}) if isinstance(reply,dict) else {}
             accepted=result.get('result') if isinstance(result,dict) else None
             output={'command_sent':True,'preflight_verified':True,
-                'accepted':accepted if isinstance(accepted,bool) else None}
+                'accepted':accepted if isinstance(accepted,bool) else None,
+                'requested_mode':requested_mode,'mode_http_status':POST_STATUS,
+                'mode_http_completed_at':POST_COMPLETED_AT,
+                'reply_metadata':safe_reply_metadata(reply),
+                'explicit_rejection':reply_explicitly_rejected(safe_reply_metadata(reply))}
         return output
 try:
     print(json.dumps(asyncio.run(main()),allow_nan=False))
 except Exception:
     if CONTROL_ATTEMPTED:
-        print(json.dumps({'command_sent':True,'preflight_verified':True,'outcome_unknown':True}))
+        print(json.dumps({'command_sent':True,'preflight_verified':True,'outcome_unknown':True,
+            'mode_http_status':POST_STATUS,'mode_http_completed_at':POST_COMPLETED_AT}))
     else:
         print(json.dumps({'adapter_failed':True,'reason':'private_error_suppressed'}))
         raise SystemExit(1)
@@ -157,6 +173,17 @@ def live_policy_enabled(path=POLICY):
     except (OSError,ValueError,TypeError):return False
 
 
+def savings_policy_enabled(path, *, expected_site_id):
+    """Savings requires a distinct explicit grant; fallback approval is insufficient."""
+    try:
+        policy=private_document(path)
+        return (live_policy_enabled(path) and policy.get('recurring_enabled') is True
+            and policy.get('allow_savings_enable') is True
+            and type(policy.get('energy_site_id')) is int
+            and policy['energy_site_id']==expected_site_id)
+    except (OSError,ValueError,TypeError):return False
+
+
 def _instant(value):
     value=datetime.fromisoformat(value.replace('Z','+00:00')) if isinstance(value,str) else value
     if not isinstance(value,datetime) or value.tzinfo is None or value.utcoffset() is None:
@@ -166,23 +193,27 @@ def _instant(value):
 
 class FallbackAdapter:
     def __init__(self, ownership, *, policy_path=POLICY, transport=None, enrollment_reader=None,
-                 enrollment_refresher=None, active_mode_reader=None, lease_path=None, lock_path=None):
+                 enrollment_refresher=None, active_mode_reader=None, lease_path=None, lock_path=None,
+                 mode_authorizer=None, mode_attempt_recorder=None):
         self.ownership=dict(ownership)
         self.policy_path=policy_path
         self.transport=transport or self._child
         self.enrollment_reader=enrollment_reader or self._read_enrollment
         self.enrollment_refresher=enrollment_refresher or (lambda:self._read_enrollment(force_refresh=True))
         self.active_mode_reader=active_mode_reader or read_active_mode
+        self.mode_authorizer=mode_authorizer
+        self.mode_attempt_recorder=mode_attempt_recorder
         self.lease_path=Path(lease_path) if lease_path else STATE_DIR/'output'/'publisher-lease.json'
         self.lock_path=Path(lock_path) if lock_path else STATE_DIR/'.control.lock'
 
     def _child(self,action, expected, live_authorized):
         source=('SCHEMA_SOURCE='+repr((ROOT/'tariff_schema.py').read_text())+'\n'
             +'AUTH_SOURCE='+repr(secret_reader_source())+'\n'
+            +'REPLY_METADATA_SOURCE='+repr(reply_metadata_source())+'\n'
             +'ACTION='+repr(action)+'\nEXPECTED='+repr(expected)+'\n'
             +'LIVE_AUTHORIZED='+repr(live_authorized)+'\n'+REMOTE)
         env=task_env()
-        if action=='self_powered':
+        if action in {'self_powered','savings'}:
             wrapper='import json,sys;exec(json.loads(sys.stdin.readline()))'
             process=subprocess.Popen([sys.executable,'-c',wrapper],
                 stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,env=env)
@@ -223,21 +254,82 @@ class FallbackAdapter:
         return read_enrollment(refresh=force_refresh)
 
     def _confirm_remote_preflight(self,expected,*,remote_ready_at=None):
-        if not live_policy_enabled(self.policy_path):return False
-        refreshed=self.enrollment_refresher()
-        active=self.active_mode_reader()
+        if getattr(self,'_pending_action',None)=='savings':
+            return self._confirm_savings_preflight(expected,remote_ready_at=remote_ready_at)
         try:
+            if not live_policy_enabled(self.policy_path):return False
+            refreshed=self.enrollment_refresher()
+            active=self.active_mode_reader()
             age=(datetime.now(timezone.utc)-_instant(refreshed.get('enrolled_last_success'))).total_seconds()
             ready_age=(datetime.now(timezone.utc)-_instant(
                 remote_ready_at or expected.get('live_last_success'))).total_seconds()
-        except (ValueError,TypeError,OverflowError):return False
-        expected_hardware=expected.get('active_mode_observation',{}).get('hardware_preserve_settings')
-        return (refreshed.get('battery_enrolled') is False and 0<=age<30 and 0<=ready_age<15
-            and active.get('mode')=='autonomous'
-            and (expected_hardware is None or active.get('hardware_preserve_settings')==expected_hardware)
-            and live_policy_enabled(self.policy_path)
-            and self._expired_lease(expected.get('current_tariff_hash'))==getattr(self,'_pending_lease',None)
-            and getattr(self,'_pending_lease',None) is not None)
+            expected_hardware=expected.get('active_mode_observation',{}).get('hardware_preserve_settings')
+            lease=getattr(self,'_pending_lease',None)
+            if (refreshed.get('battery_enrolled') is not False or not 0<=age<30 or not 0<=ready_age<15
+                or active.get('mode')!='autonomous'
+                or (expected_hardware is not None and active.get('hardware_preserve_settings')!=expected_hardware)
+                or not live_policy_enabled(self.policy_path) or lease is None
+                or self._expired_lease(expected.get('current_tariff_hash'))!=lease):return False
+            if not self._record_mode_attempt('fallback','self_consumption',expected,refreshed,active,lease):
+                return False
+            clock=datetime.now(timezone.utc)
+            return (live_policy_enabled(self.policy_path)
+                and self._expired_lease(expected.get('current_tariff_hash'))==lease
+                and 0<=(clock-_instant(refreshed['enrolled_last_success'])).total_seconds()<30
+                and 0<=(clock-_instant(remote_ready_at or expected.get('live_last_success'))).total_seconds()<15)
+        except Exception:return False
+
+    def _record_mode_attempt(self, action, target_mode, expected, refreshed, active, lease):
+        """Let the locked orchestrator durably mark its command before dispatch.
+
+        Existing one-shot callers can omit this hook. The recurring controller
+        supplies it for both directions and fails closed on any journal error.
+        """
+        if self.mode_attempt_recorder is None:return True
+        if not callable(self.mode_attempt_recorder):return False
+        context=dict(expected,**refreshed,action=action,target_mode=target_mode,
+            from_mode=active.get('mode'),energy_site_id=expected.get('energy_site_id'),
+            current_tariff_hash=expected.get('current_tariff_hash'),
+            preserve_settings=dict(expected['preserve_settings']),
+            active_mode_observation=active,lease=dict(lease))
+        return self.mode_attempt_recorder(context) is True
+
+    def _confirm_savings_preflight(self, expected, *, remote_ready_at=None):
+        """Repeat real controller and durable lease checks immediately before GO."""
+        try:
+            site=self.ownership.get('energy_site_id')
+            if not savings_policy_enabled(self.policy_path,expected_site_id=site):return False
+            refreshed=self.enrollment_refresher()
+            active=self.active_mode_reader()
+            clock=datetime.now(timezone.utc)
+            age=(clock-_instant(refreshed.get('enrolled_last_success'))).total_seconds()
+            ready_age=(clock-_instant(remote_ready_at or expected.get('live_last_success'))).total_seconds()
+            lease=self._valid_savings_lease(expected.get('current_tariff_hash'))
+            old_lease=getattr(self,'_pending_lease',None)
+            expected_hardware=expected.get('active_mode_observation',{}).get('hardware_preserve_settings')
+            if (refreshed.get('battery_enrolled') is not False or not 0<=age<30
+                or not 0<=ready_age<15 or active.get('mode')!='self_consumption'
+                or (expected_hardware is not None and active.get('hardware_preserve_settings')!=expected_hardware)
+                or lease is None or lease!=old_lease or not callable(self.mode_authorizer)):
+                return False
+            context=dict(expected,**refreshed,mode=active['mode'],active_mode_observation=active,
+                requested_mode='autonomous',lease=dict(lease))
+            if self.mode_authorizer(context) is not True:return False
+            clock=datetime.now(timezone.utc)
+            if not (savings_policy_enabled(self.policy_path,expected_site_id=site)
+                and self._valid_savings_lease(expected.get('current_tariff_hash'))==old_lease
+                and 0<=(clock-_instant(refreshed['enrolled_last_success'])).total_seconds()<30
+                and 0<=(clock-_instant(remote_ready_at or expected.get('live_last_success'))).total_seconds()<15):
+                return False
+            if not self._record_mode_attempt('enable_savings','autonomous',expected,refreshed,active,lease):
+                return False
+            clock=datetime.now(timezone.utc)
+            return (savings_policy_enabled(self.policy_path,expected_site_id=site)
+                and self._valid_savings_lease(expected.get('current_tariff_hash'))==old_lease
+                and 0<=(clock-_instant(refreshed['enrolled_last_success'])).total_seconds()<30
+                and 0<=(clock-_instant(remote_ready_at or expected.get('live_last_success'))).total_seconds()<15)
+        except Exception:
+            return False
 
     def read_snapshot(self):
         snapshot=self.transport('read',{},False)
@@ -256,7 +348,7 @@ class FallbackAdapter:
         snapshot['observed_at']=datetime.now(timezone.utc).isoformat()
         return snapshot
 
-    def set_self_powered(self, *, expected_tariff_hash, preserve_settings):
+    def set_self_powered(self, *, expected_tariff_hash, preserve_settings, lock_held=False):
         # Default policy forbids a mutation before credentials or network access.
         if not live_policy_enabled(self.policy_path):
             return {'command_sent':False,'preflight_verified':False,'reason':'live_execution_disabled'}
@@ -268,13 +360,16 @@ class FallbackAdapter:
                 and preserve_settings.get('grid_charging')!='not_reported')
             or preserve_settings.get('export_permission') not in {'battery_ok','pv_only','never'}):
             return {'command_sent':False,'preflight_verified':False,'reason':'protected_settings_unknown'}
-        fd=os.open(self.lock_path,os.O_CREAT|os.O_WRONLY|os.O_NOFOLLOW,0o600)
+        fd=None
         try:
-            fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            if lock_held is not True:
+                fd=os.open(self.lock_path,os.O_CREAT|os.O_WRONLY|os.O_NOFOLLOW,0o600)
+                fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
             return self._set_locked(expected_tariff_hash,preserve_settings)
         except BlockingIOError:
             return {'command_sent':False,'preflight_verified':False,'reason':'controller_busy'}
-        finally:os.close(fd)
+        finally:
+            if fd is not None:os.close(fd)
 
     def _expired_lease(self, expected_tariff_hash):
         try:
@@ -311,6 +406,76 @@ class FallbackAdapter:
             return {'command_sent':False,'preflight_verified':False,'reason':'live_execution_disabled'}
         if self._expired_lease(expected_tariff_hash)!=lease:
             return {'command_sent':False,'preflight_verified':False,'reason':'publisher_lease_changed'}
-        self._pending_lease=lease
+        self._pending_lease=lease;self._pending_action='self_powered'
         try:return self.transport('self_powered',before,True)
-        finally:self._pending_lease=None
+        finally:self._pending_lease=None;self._pending_action=None
+
+    def _valid_savings_lease(self, expected_tariff_hash):
+        try:
+            lease=private_document(self.lease_path);clock=datetime.now(timezone.utc)
+            until=_instant(lease.get('guard_lease_until'))
+            valid=(lease.get('guard_lease_trusted') is True
+                and lease.get('verified_publisher_write') is True
+                and lease.get('tariff_semantic_hash')==expected_tariff_hash
+                and lease.get('energy_site_id')==self.ownership.get('energy_site_id')
+                and 10<(until-clock).total_seconds()<=300)
+            for key in ('source_last_success','source_captured_at'):
+                source_time=_instant(lease.get(key))
+                valid=valid and 0<=(clock-source_time).total_seconds()<900
+                valid=valid and until<=source_time+timedelta(seconds=900)
+            valid=valid and _instant(lease.get('source_last_success'))<=_instant(lease.get('source_captured_at'))
+            valid=valid and _instant(lease.get('known_valid_from'))<=clock<_instant(lease.get('known_valid_until'))
+            valid=valid and until<=_instant(lease.get('known_valid_until'))
+            return lease if valid else None
+        except (OSError,ValueError,TypeError,OverflowError):return None
+
+    def set_savings(self, *, expected_tariff_hash, preserve_settings, lock_held=False):
+        """Explicitly enable Savings only against an owned fresh, unexpired lease.
+
+        The orchestrator may pass ``lock_held=True`` only while it owns the same
+        control lock. No automatic resume decision is made here: the supplied
+        mode_authorizer must verify runtime ownership/journal/watchdog policy.
+        """
+        if not savings_policy_enabled(self.policy_path,expected_site_id=self.ownership.get('energy_site_id')):
+            return {'command_sent':False,'preflight_verified':False,'reason':'savings_execution_disabled'}
+        if not callable(self.mode_authorizer):
+            return {'command_sent':False,'preflight_verified':False,'reason':'mode_authorizer_required'}
+        if (self.ownership.get('verified_publisher_write') is not True
+            or self.ownership.get('tariff_semantic_hash')!=expected_tariff_hash):
+            return {'command_sent':False,'preflight_verified':False,'reason':'publisher_ownership_unverified'}
+        if (not isinstance(preserve_settings,dict)
+            or set(preserve_settings)!={'backup_reserve','grid_charging','export_permission'}
+            or type(preserve_settings.get('backup_reserve')) not in {int,float}
+            or not 0<=preserve_settings['backup_reserve']<=100
+            or (type(preserve_settings.get('grid_charging')) is not bool
+                and preserve_settings.get('grid_charging')!='not_reported')
+            or preserve_settings.get('export_permission') not in {'battery_ok','pv_only','never'}):
+            return {'command_sent':False,'preflight_verified':False,'reason':'protected_settings_unknown'}
+        descriptor=None
+        try:
+            if lock_held is not True:
+                descriptor=os.open(self.lock_path,os.O_WRONLY|os.O_CREAT|os.O_NOFOLLOW,0o600)
+                fcntl.flock(descriptor,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            lease=self._valid_savings_lease(expected_tariff_hash)
+            if lease is None:return {'command_sent':False,'preflight_verified':False,'reason':'trusted_live_lease_required'}
+            before=self.read_snapshot();clock=datetime.now(timezone.utc)
+            if (before.get('publisher_owns_installed_tariff') is not True
+                or before.get('current_tariff_hash')!=expected_tariff_hash
+                or before.get('preserve_settings')!=preserve_settings
+                or before.get('mode')!='self_consumption'
+                or before.get('energy_commands_granted') is not True
+                or before.get('battery_enrolled') is not False
+                or not 0<=(clock-_instant(before.get('enrolled_last_success'))).total_seconds()<45*60
+                or not 0<=(clock-_instant(before.get('live_last_success'))).total_seconds()<5*60):
+                return {'command_sent':False,'preflight_verified':False,'reason':'state_changed'}
+            if not savings_policy_enabled(self.policy_path,expected_site_id=self.ownership.get('energy_site_id')):
+                return {'command_sent':False,'preflight_verified':False,'reason':'savings_execution_disabled'}
+            if self._valid_savings_lease(expected_tariff_hash)!=lease:
+                return {'command_sent':False,'preflight_verified':False,'reason':'publisher_lease_changed'}
+            self._pending_lease=lease;self._pending_action='savings'
+            try:return self.transport('savings',before,True)
+            finally:self._pending_lease=None;self._pending_action=None
+        except BlockingIOError:
+            return {'command_sent':False,'preflight_verified':False,'reason':'controller_busy'}
+        finally:
+            if descriptor is not None:os.close(descriptor)

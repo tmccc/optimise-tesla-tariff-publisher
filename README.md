@@ -6,11 +6,12 @@ Experimental Python tools for turning Home Assistant Optimise price sensors into
 paired Tesla Powerwall import/export tariff proposals, with validation, readback
 checks and a guarded Self-Powered fallback.
 
-This is a standalone, manually supervised prototype. The separate
+This is a standalone experimental controller. The separate
 [E.ON Next Optimise Home Assistant integration](https://github.com/tmccc/ha-eon-next-optimise)
-provides the source readings. This repository does not install a HACS component,
-provide a recurring publisher, or enable automatic startup. Live execution and
-design approvals default to **off**.
+provides the source readings. This repository does not install a HACS component.
+It includes an optional recurring publisher, an independent watchdog and user
+service templates for startup after reboot. Installing the code starts nothing;
+live execution and design approvals default to **off**.
 
 ## Start with the offline example
 
@@ -42,8 +43,12 @@ private state directory, outside version control.
 - Semantic price hashes and independent comparisons of both quoted channels.
 - An explicitly approved frozen-current-pair assumption for unquoted periods.
 - Separate tariff and fallback policies; site/hash pins, short leases, ownership
-  records, a manually run watchdog and an at-most-once attempt journal.
-- A supervised one-shot tariff sender and mode-only Self-Powered fallback.
+  records, an independent watchdog and an at-most-once attempt journal.
+- A supervised one-shot sender and an explicitly armed recurring controller.
+- Paired import/export updates when quotes change, with no-POST lease renewal
+  when the installed tariff still matches fresh quotes.
+- A Self-Powered expiry fallback and separately approved Savings enable/resume,
+  with persistent pauses for manual changes and Optimise activation.
 
 Core planning functions are pure. Tests use synthetic fixtures and fake transports.
 The public copy uses explicit credential files and native Python HTTPS children;
@@ -92,14 +97,15 @@ The reader does not create that service or change its configuration. Observation
 time is distinguished from the gateway's unavailable precise polling timestamp.
 Cloud default-mode readback can lag the active state, so it is retained separately.
 
-The two `examples/*.example.json` policy files have all approvals and live flags
+The `examples/*.example.json` policy files have all approvals and live flags
 disabled, and null account/hash/approval pins. Actual policy files belong in
 `OPTIMISE_TESLA_STATE_DIR`, not the source checkout. They must also be owned by
 the current user, regular non-symlink files with mode `0600`. Merely installing or importing this code
 does not arm a controller. The one-shot sender requires a separately running,
 healthy, armed watchdog and explicit operator approval. Its short test lease is
 at most three minutes; the watchdog normally acts on the next polling cycle.
-There is no automatic return to Savings.
+The one-shot path never returns to Savings automatically. Recurring Savings
+management requires a separate explicit grant and a fresh verified lease.
 
 The command transports currently require a single eligible battery energy site
 on the account. `TESLA_ENERGY_SITE_ID` can select a readback site; it does not
@@ -107,7 +113,22 @@ remove that live-command limitation. Ambiguous assets are refused.
 
 Preparation does not inherit design consent. `--design-approvals PATH` accepts
 explicit choices; omitting it leaves those choices unapproved. It never arms
-either live policy.
+either live policy. Recurring setup additionally requires its own explicit
+controller policy; a one-shot approval does not enable recurring execution.
+
+## Recurring operation
+
+Read [the controller and recovery notes](docs/recurring-operation.md) before
+arming recurring execution. The publisher checks every two minutes; the separate
+watchdog monitors the currently installed tariff's short lease. A running process
+alone is insufficient: every publication and Savings enable requires fresh
+prices, a healthy independent watchdog, actual gateway mode, permissions,
+ownership and confirmed Optimise non-enrolment.
+
+The [user-service deployment guide](docs/recurring-services.md) describes the
+user-local release, virtual environment and configuration layout, startup after
+reboot, status checks and safe stopping order. These services expose no browser
+or management listener and do not require the Android emulator.
 
 ## Important operational limits
 
@@ -119,9 +140,10 @@ either live policy.
   **assumption**, requiring explicit approval, and can affect optimiser lookahead.
 - A Tesla tariff has no documented TTL. Stopping uploads does not expire it.
   A failed host or network cannot guarantee that a fallback command reaches Tesla.
-- A successful HTTP status alone does not create normal verified ownership.
-  Initial uncertain acknowledgements/readback require supervised reconciliation;
-  that path records the uncertainty rather than fabricating an acknowledgement.
+- A successful HTTP status alone does not create verified ownership. A durable
+  before/after intent, protected settings and two distinct matching readbacks
+  are needed to resolve a recurring write whose application acknowledgement is
+  unknown. The record retains that uncertainty; an ambiguous POST is not resent.
 - Enrolled or unknown Optimise control, stale observations, changed tariffs or
   unexpected settings pause the controller instead of overriding another owner.
 - Gateway settings omitted by a provider remain explicitly unknown. Reported
@@ -129,11 +151,10 @@ either live policy.
 - Source readings remain forecasts, not independently verified settlement or
   billing records. No VAT, margins or historical prices are invented.
 
-The original prototype was exercised in supervised testing. The portable public
-adapters have been refactored and covered by offline tests; they have not been
-revalidated against a live account as part of publication. Review and validate
-the complete setup before any live use. Do not assume this is an unattended
-production controller.
+The original prototype was exercised in supervised testing. Offline tests cover
+the compiler, transports, recurring decisions and crash recovery. Validate the
+complete deployed setup against its real inputs before live use; these checks
+do not make this an unattended production controller.
 
 ## Development and boundaries
 

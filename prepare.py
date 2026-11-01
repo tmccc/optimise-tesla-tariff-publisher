@@ -198,9 +198,14 @@ def private_json(path, value):
         with os.fdopen(fd, 'w') as handle:
             json.dump(value, handle, indent=2, allow_nan=False)
             handle.write('\n')
+            handle.flush()
+            os.fsync(handle.fileno())
         if path.is_symlink():
             raise ValueError('output_symlink_rejected')
         os.replace(temp, path)
+        directory_fd=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        try:os.fsync(directory_fd)
+        finally:os.close(directory_fd)
     finally:
         temp.unlink(missing_ok=True)
 

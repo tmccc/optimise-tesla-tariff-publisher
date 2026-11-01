@@ -15,6 +15,7 @@ from date_compiler import build_date_candidate
 from tariff_schema import semantic_hash
 from writer import REMOTE, TariffWriter, publisher_policy_enabled, validate_candidate
 from auth import secret_reader_source
+from reply_metadata import reply_metadata_source
 
 UTC=timezone.utc
 NOW=datetime(2026,11,1,12,5,tzinfo=UTC)
@@ -105,7 +106,7 @@ class WriterTests(unittest.TestCase):
         return (writer or self.make()).publish(candidate or self.candidate,
             manifest=self.manifest if manifest is None else manifest,
             expected_site_id=kw.get('site',123),expected_installed_hash=kw.get('old',OLD),
-            preserve_settings=kw.get('keep',KEEP))
+            preserve_settings=kw.get('keep',KEEP),operation_mode=kw.get('operation_mode','autonomous'))
 
     def test_disabled_policy_has_zero_auth_or_network_calls(self):
         self.assertEqual(self.publish()['reason'],'live_execution_disabled')
@@ -235,6 +236,47 @@ class WriterTests(unittest.TestCase):
             manifest=deepcopy(self.manifest);manifest.update(change)
             self.assertTrue(validate_candidate(self.candidate,manifest,now=NOW))
 
+    def arm_recurring(self):
+        self.arm();policy=json.loads(self.policy.read_text())
+        policy.update(one_shot_only=False,recurring_enabled=True)
+        self.write(self.policy,policy)
+
+    def test_recurring_is_an_explicit_distinct_policy_mode(self):
+        self.arm();policy=json.loads(self.policy.read_text());policy['one_shot_only']=False
+        self.write(self.policy,policy)
+        self.assertFalse(self.publish()['command_sent']);self.assertEqual(self.calls,[])
+        policy['recurring_enabled']=True;self.write(self.policy,policy)
+        self.assertTrue(self.publish()['command_sent'])
+
+    def test_initial_self_powered_publish_requires_recurring_permission(self):
+        self.arm()
+        self.assertEqual(self.publish(operation_mode='self_consumption')['reason'],'one_shot_savings_mode_required')
+        self.assertEqual(self.calls,[])
+        self.arm_recurring()
+        result=self.publish(operation_mode='self_consumption')
+        self.assertTrue(result['readback_verified'])
+        self.assertEqual(result['expected_active_mode'],'self_consumption')
+        self.assertTrue(result['active_mode_verification_required'])
+
+    def test_recurring_accepts_known_lagging_cloud_mode_but_requires_final_caller(self):
+        self.arm_recurring();original=self.ready
+        self.ready=lambda context:dict(original(context),mode='self_consumption')
+        self.reply={'mode':'self_consumption'}
+        seen=[]
+        def check(context):
+            seen.append(context)
+            return context['expected_active_mode']=='autonomous' and context['cloud_default_mode']=='self_consumption'
+        result=self.publish(self.make(final_authorizer=check))
+        self.assertTrue(result['readback_verified']);self.assertEqual(len(seen),1)
+        self.authorized=False
+        self.assertFalse(self.publish()['command_sent'])
+
+    def test_recurring_rechecks_current_cycle_hash_pins(self):
+        self.arm_recurring();policy=json.loads(self.policy.read_text())
+        policy['approved_candidate_semantic_hash']='f'*64;self.write(self.policy,policy)
+        self.assertFalse(self.publish(operation_mode='self_consumption')['command_sent'])
+        self.assertEqual(self.calls,[])
+
     def test_unknown_exception_never_exposes_credential_like_text(self):
         self.arm()
         def fail(context,confirm):raise ValueError('private token=DO_NOT_EXPORT')
@@ -246,7 +288,7 @@ class WriterTests(unittest.TestCase):
         ast.parse(REMOTE)
 
     def remote_fixture(self, *, accepted=True, apply=True, post_status=200, changed_before=False,
-                       token_configured=True):
+                       token_configured=True, reply_body=None, recurring=False, cloud_mode='autonomous'):
         """Execute actual embedded logic with fake HTTP/auth boundaries only."""
         candidate=deepcopy(self.candidate)
         old=deepcopy(candidate)
@@ -255,8 +297,9 @@ class WriterTests(unittest.TestCase):
         old_hash=semantic_hash(old)
         expected={'energy_site_id':123,'current_tariff_hash':old_hash,
             'candidate_tariff_hash':self.candidate_hash,'preserve_settings':dict(KEEP)}
+        if recurring:expected['allowed_cloud_modes']=['autonomous','self_consumption']
         calls=[];posted=[False]
-        info={'default_real_mode':'autonomous','backup_reserve_percent':10,
+        info={'default_real_mode':cloud_mode,'backup_reserve_percent':10,
               'components':{'customer_preferred_export_rule':'battery_ok'}}
         token_path=self.root/'synthetic-tessie-token'
         descriptor=os.open(token_path,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
@@ -288,7 +331,7 @@ class WriterTests(unittest.TestCase):
                     if path!='/api/1/energy_sites/123/time_of_use_settings':raise AssertionError('Wrong command')
                     if kwargs.get('json')!={'tou_settings':{'tariff_content_v2':candidate}}:raise AssertionError('Wrong body')
                     posted[0]=apply
-                    return Response({'response':{'result':accepted}},post_status)
+                    return Response({'response':{'result':accepted}} if reply_body is None else reply_body,post_status)
                 if method!='GET':raise AssertionError('Wrong HTTP method')
                 if path=='/auth/tesla_scopes':return Response({'scopes':['energy_device_data','energy_cmds']})
                 if path=='/api/1/products':return Response({'response':[{'energy_site_id':123,'components':{'battery':True}}]})
@@ -303,6 +346,7 @@ class WriterTests(unittest.TestCase):
         fake_aiohttp.ClientTimeout=lambda **kwargs:kwargs
         namespace={'SCHEMA_SOURCE':(Path(__file__).resolve().parents[1]/'tariff_schema.py').read_text(),
             'AUTH_SOURCE':secret_reader_source(),
+            'REPLY_METADATA_SOURCE':reply_metadata_source(),
             'CANDIDATE':candidate,'EXPECTED':expected,'LIVE_AUTHORIZED':True}
         stdin=io.StringIO(json.dumps({'proceed':True,'valid_until':
             (datetime.now(UTC)+timedelta(seconds=4)).isoformat()})+'\n')
@@ -352,6 +396,30 @@ class WriterTests(unittest.TestCase):
         self.assertEqual(calls,[])
         self.assertFalse(values[-1]['command_sent'])
         self.assertEqual(values[-1]['reason'],'private_error_suppressed')
+
+    def test_actual_child_records_completed_http200_with_unknown_nested_ack(self):
+        values,calls=self.remote_fixture(reply_body={'data':{'status':'queued','message':'PRIVATE_TOKEN_DO_NOT_SAVE'}})
+        result=values[-1]
+        self.assertIsNone(result['write_accepted']);self.assertEqual(result['write_http_status'],200)
+        self.assertIsNotNone(result['write_http_completed_at'])
+        self.assertLessEqual(datetime.fromisoformat(result['write_http_completed_at']),
+            datetime.fromisoformat(result['readback']['observed_at']))
+        self.assertNotIn('PRIVATE_TOKEN_DO_NOT_SAVE',json.dumps(result))
+        self.assertFalse(result['explicit_rejection'])
+        self.assertEqual(sum(method=='POST' for method,_,_ in calls),1)
+
+    def test_actual_child_detects_explicit_failure_in_alternate_wrapper(self):
+        values,_calls=self.remote_fixture(reply_body={'result':False,'error':'PRIVATE_ERROR_DO_NOT_SAVE'},apply=False)
+        result=values[-1]
+        self.assertTrue(result['explicit_rejection'])
+        self.assertIsNone(result['write_accepted'])
+        self.assertNotIn('PRIVATE_ERROR_DO_NOT_SAVE',json.dumps(result))
+
+    def test_actual_child_can_write_valid_tariff_while_cloud_default_self_powered(self):
+        values,calls=self.remote_fixture(recurring=True,cloud_mode='self_consumption')
+        self.assertTrue(values[0]['preflight_ready'])
+        self.assertTrue(values[-1]['readback_verified'])
+        self.assertEqual(sum(method=='POST' for method,_,_ in calls),1)
 
 
 if __name__=='__main__':unittest.main()

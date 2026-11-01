@@ -1,0 +1,24 @@
+[Unit]
+Description=Recurring Optimise Tesla tariff publisher
+Wants=optimise-tesla-watchdog.service
+After=optimise-tesla-watchdog.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/lib/optimise-tesla-tariff-publisher/current
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+Environment=OPTIMISE_TESLA_STATE_DIR=%h/.local/state/optimise-tesla-tariff-publisher
+EnvironmentFile=%h/.config/optimise-tesla-tariff-publisher/environment
+ExecStart=%h/.local/lib/optimise-tesla-tariff-publisher/venv/bin/python %h/.local/lib/optimise-tesla-tariff-publisher/current/recurring.py --watch
+Restart=always
+RestartSec=15s
+TimeoutStopSec=30s
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=yes
+Nice=10
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "generation": "replace-with-an-explicit-approval-generation",
+  "enabled": false,
+  "energy_site_id": null,
+  "manage_savings": false,
+  "resume_after_own_fallback": false,
+  "bootstrap_from_self_powered": false,
+  "bootstrap_baseline_hash": null,
+  "fallback_approved": false,
+  "frozen_assumption_approved": false
+}

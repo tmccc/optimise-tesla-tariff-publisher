@@ -26,6 +26,11 @@ execution-policy.json
 publisher-policy.json
 publisher-ownership.json
 publisher-lease.json
+recurring-policy.json
+recurring-journal.json
+mode-intent*.json
+tariff-pending.json
+watchdog-health.json
 *-receipt.json
 *-readback.json
 *-token.txt

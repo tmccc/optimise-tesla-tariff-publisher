@@ -22,6 +22,7 @@ from runtime import FallbackAdapter, POLICY as FALLBACK_POLICY, live_policy_enab
 from auth import secret_reader_source
 from config import ROOT, STATE_DIR, task_env
 from tariff_schema import semantic_hash, to_upload_tariff, validate_tariff
+from reply_metadata import reply_metadata_source
 
 UTC = timezone.utc
 PUBLISHER_POLICY = STATE_DIR / 'publisher-policy.json'
@@ -105,9 +106,11 @@ def validate_candidate(candidate, manifest, *, now):
 def publisher_policy_enabled(path, *, candidate_hash, expected_site_id, expected_installed_hash):
     try:
         policy = private_document(path)
+        mode_approved=(policy.get('one_shot_only') is True
+            or (policy.get('one_shot_only') is False and policy.get('recurring_enabled') is True))
         return (policy.get('live_execution_enabled') is True
             and policy.get('allow_tariff_writes') is True
-            and policy.get('one_shot_only') is True
+            and mode_approved
             and policy.get('unquoted_policy') == 'frozen_current_quote'
             and policy.get('unquoted_planning_assumption_approved') is True
             and policy.get('fallback_design_approved') is True
@@ -128,10 +131,12 @@ import aiohttp
 logging.disable(logging.CRITICAL)
 ATTEMPTED=False
 POST_STATUS=None
+POST_COMPLETED_AT=None
 schema=types.ModuleType('_writer_tariff_schema')
 sys.modules[schema.__name__]=schema
 exec(SCHEMA_SOURCE,schema.__dict__)
 exec(AUTH_SOURCE,globals())
+exec(REPLY_METADATA_SOURCE,globals())
 
 async def main():
     if LIVE_AUTHORIZED is not True or schema.validate_tariff(CANDIDATE):
@@ -143,7 +148,7 @@ async def main():
     async with aiohttp.ClientSession(trust_env=False,
         timeout=aiohttp.ClientTimeout(total=20)) as session:
         async def request(method,path,body=None):
-            global ATTEMPTED,POST_STATUS
+            global ATTEMPTED,POST_STATUS,POST_COMPLETED_AT
             if path not in allowed:raise ValueError('endpoint_denied')
             if method!='GET' and not (method=='POST' and path==write_path
                 and LIVE_AUTHORIZED is True
@@ -160,7 +165,9 @@ async def main():
                     if not piece:break
                     pieces.append(piece);size+=len(piece)
                 if response.status!=200 or size>2*1024*1024:
+                    if method=='POST':POST_COMPLETED_AT=datetime.now(timezone.utc).isoformat()
                     raise ValueError('response_unavailable')
+                if method=='POST':POST_COMPLETED_AT=datetime.now(timezone.utc).isoformat()
                 return json.loads(b''.join(pieces))
         scopes_reply=await request('GET','/auth/tesla_scopes')
         scopes=scopes_reply.get('scopes') if isinstance(scopes_reply,dict) else None
@@ -202,7 +209,8 @@ async def main():
                 'live_last_success':datetime.now(timezone.utc).isoformat()}
         before=await snapshot()
         if (before['current_tariff_hash']!=EXPECTED.get('current_tariff_hash')
-            or before['mode']!='autonomous' or before['preserve_settings']!=EXPECTED.get('preserve_settings')
+            or before['mode'] not in EXPECTED.get('allowed_cloud_modes',['autonomous'])
+            or before['preserve_settings']!=EXPECTED.get('preserve_settings')
             or any(x is None for x in before['preserve_settings'].values())
             or before['energy_commands_granted'] is not True):
             return {'command_sent':False,'reason':'remote_preflight_changed'}
@@ -218,16 +226,21 @@ async def main():
         accepted=None
         acknowledged_at=None
         response_code=None
+        reply_metadata=None
         try:
             reply=await request('POST',write_path,{'tou_settings':{'tariff_content_v2':CANDIDATE}})
+            reply_metadata=safe_reply_metadata(reply)
             body=reply.get('response') if isinstance(reply,dict) else None
-            if isinstance(body,dict) and type(body.get('code')) is int:response_code=body['code']
+            if isinstance(body,dict) and type(body.get('code')) is int and 0<=body['code']<=599:
+                response_code=body['code']
             if isinstance(body,dict) and isinstance(body.get('result'),bool):accepted=body['result']
             if accepted is True:acknowledged_at=datetime.now(timezone.utc).isoformat()
         except Exception:
             pass
         result={'command_sent':True,'control_requests':1,'write_accepted':accepted,
             'write_response_code':response_code,
+            'write_http_completed_at':POST_COMPLETED_AT,'reply_metadata':reply_metadata,
+            'explicit_rejection':reply_explicitly_rejected(reply_metadata),
             'write_acknowledged':accepted is True,'write_acknowledged_at':acknowledged_at,
             'write_http_status':POST_STATUS,'candidate_tariff_hash':EXPECTED['candidate_tariff_hash'],
             'expected_installed_hash':EXPECTED['current_tariff_hash']}
@@ -237,7 +250,8 @@ async def main():
             result.update(after)
             result['readback']=dict(after)
             result['readback_verified']=(after['current_tariff_hash']==EXPECTED['candidate_tariff_hash']
-                and after['mode']=='autonomous' and after['preserve_settings']==EXPECTED['preserve_settings'])
+                and after['mode'] in EXPECTED.get('allowed_cloud_modes',['autonomous'])
+                and after['preserve_settings']==EXPECTED['preserve_settings'])
         except Exception:
             result.update({'readback_verified':False,'outcome_unknown':True})
         return result
@@ -246,6 +260,7 @@ try:
 except Exception:
     print(json.dumps({'command_sent':True if ATTEMPTED else False,
         'control_requests':1 if ATTEMPTED else 0,'readback_verified':False,
+        'write_http_status':POST_STATUS,'write_http_completed_at':POST_COMPLETED_AT,
         'outcome_unknown':True if ATTEMPTED else False,
         'reason':'private_error_suppressed'}),flush=True)
 '''
@@ -275,7 +290,7 @@ class TariffWriter:
             if (ready.get('energy_site_id') != context['energy_site_id']
                 or ready.get('current_tariff_hash') != context['current_tariff_hash']
                 or ready.get('candidate_tariff_hash') != context['candidate_tariff_hash']
-                or ready.get('mode') != 'autonomous'
+                or ready.get('mode') not in context['allowed_cloud_modes']
                 or ready.get('energy_commands_granted') is not True
                 or ready.get('preserve_settings') != context['preserve_settings']):return False
             refreshed = self.enrollment_refresher()
@@ -286,6 +301,8 @@ class TariffWriter:
                 or validate_candidate(context['candidate'], context['manifest'], now=clock)):
                 return False
             final = dict(ready, **refreshed)
+            final['expected_active_mode']=context['operation_mode']
+            final['cloud_default_mode']=ready.get('mode')
             if self.final_authorizer(deepcopy(final)) is not True:return False
             clock = _instant(self.clock())
             if (not self._policy(context)
@@ -300,9 +317,10 @@ class TariffWriter:
 
     def _child(self, context, confirm):
         expected = {key: context[key] for key in ('energy_site_id','current_tariff_hash',
-                                                'candidate_tariff_hash','preserve_settings')}
+                                                'candidate_tariff_hash','preserve_settings','allowed_cloud_modes')}
         source = ('SCHEMA_SOURCE=' + repr((ROOT/'tariff_schema.py').read_text()) + '\n'
             + 'AUTH_SOURCE=' + repr(secret_reader_source()) + '\n'
+            + 'REPLY_METADATA_SOURCE=' + repr(reply_metadata_source()) + '\n'
             + 'CANDIDATE=' + repr(context['candidate']) + '\n'
             + 'EXPECTED=' + repr(expected) + '\nLIVE_AUTHORIZED=True\n' + REMOTE)
         wrapper = 'import json,sys;exec(json.loads(sys.stdin.readline()))'
@@ -333,7 +351,7 @@ class TariffWriter:
                 process.kill();process.communicate(timeout=5)
 
     def publish(self, candidate_tariff, *, manifest, expected_site_id,
-                expected_installed_hash, preserve_settings):
+                expected_installed_hash, preserve_settings, operation_mode='autonomous'):
         """Attempt one pinned tariff write; never grant permissions or alter modes."""
         self._last_confirmation=None
         self._go_sent=False
@@ -343,12 +361,18 @@ class TariffWriter:
             if errors:return dict(blocked,reason='candidate_invalid',validation_errors=errors)
             if (type(expected_site_id) is not int or expected_site_id<=0
                 or not isinstance(expected_installed_hash,str) or not HASH.fullmatch(expected_installed_hash)
-                or not _protected(preserve_settings)):
+                or not _protected(preserve_settings)
+                or operation_mode not in {'autonomous','self_consumption'}):
                 return dict(blocked,reason='expected_state_invalid')
             candidate=to_upload_tariff(candidate_tariff)
             context={'candidate':candidate,'manifest':deepcopy(manifest),'energy_site_id':expected_site_id,
                 'candidate_tariff_hash':semantic_hash(candidate),'current_tariff_hash':expected_installed_hash,
-                'preserve_settings':deepcopy(preserve_settings)}
+                'preserve_settings':deepcopy(preserve_settings),'operation_mode':operation_mode}
+            policy=private_document(self.policy_path)
+            recurring=(policy.get('recurring_enabled') is True and policy.get('one_shot_only') is False)
+            if not recurring and operation_mode!='autonomous':
+                return dict(blocked,reason='one_shot_savings_mode_required')
+            context['allowed_cloud_modes']=(['autonomous','self_consumption'] if recurring else ['autonomous'])
             if not self._policy(context):return dict(blocked,reason='live_execution_disabled')
             if not callable(self.final_authorizer):return dict(blocked,reason='final_authorizer_required')
             if context['candidate_tariff_hash']==expected_installed_hash:
@@ -373,10 +397,12 @@ class TariffWriter:
             result['readback_verified']=bool(result.get('command_sent') is True
                 and result.get('current_tariff_hash')==context['candidate_tariff_hash']
                 and result.get('energy_site_id')==expected_site_id
-                and result.get('mode')=='autonomous'
+                and result.get('mode') in context['allowed_cloud_modes']
                 and result.get('preserve_settings')==preserve_settings
                 and self._last_confirmation is not None)
             result['candidate_tariff_hash']=context['candidate_tariff_hash']
+            result['active_mode_verification_required']=True
+            result['expected_active_mode']=operation_mode
             result['expected_installed_hash']=expected_installed_hash
             return result
         except Exception:
