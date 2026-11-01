@@ -139,7 +139,8 @@ or management listener and do not require the Android emulator.
 
 Optional [Home Assistant alert setup notes](docs/home-assistant-alerts.md) and a
 [generic package example](examples/home-assistant-alerts.example.yaml) cover
-failed/stale price updates, observed Self-Powered mode and recovery messages.
+failed/stale price updates, observed Self-Powered mode, recovery messages and
+sustained grid-export start notifications.
 Adapt the source entities and existing notification service before installing;
 the publisher does not install these automations automatically.
 

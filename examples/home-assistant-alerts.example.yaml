@@ -3,7 +3,7 @@
 # Assumes the Optimise integration's five-minute price update cadence.
 # Do not install alongside existing automations/helpers with these same IDs.
 # Omit helper initial values so incident state can restore after HA restart.
-# This example changes only notifications and its own incident helpers.
+# Only notifications, derived monitoring sensors and their own latches are changed.
 
 input_boolean:
   optimise_price_alert_active:
@@ -12,6 +12,9 @@ input_boolean:
   optimise_self_powered_alert_active:
     name: Optimise Self-Powered alert active
     icon: mdi:battery-alert-variant-outline
+  optimise_export_alert_active:
+    name: Optimise export alert active
+    icon: mdi:transmission-tower-export
 automation:
 - id: optimise_price_updates_monitor
   alias: Optimise price updates failed and restored
@@ -239,3 +242,99 @@ automation:
   max_exceeded: silent
   trace:
     stored_traces: 10
+- id: optimise_grid_export_started
+  alias: Optimise grid export started alert
+  description: Notify once after meaningful net export; re-arm silently after export falls below50W
+    for2minutes. Fresh local meter data only. No Powerwall control actions.
+  triggers:
+  - trigger: state
+    entity_id: binary_sensor.optimise_grid_export_active
+    id: export_gate_changed
+  - trigger: time_pattern
+    minutes: /1
+    id: catchup
+  - trigger: homeassistant
+    event: start
+    id: startup
+  conditions: []
+  actions:
+  - choose:
+    - conditions:
+      - condition: state
+        entity_id: binary_sensor.optimise_grid_export_active
+        state: 'on'
+      - condition: state
+        entity_id: input_boolean.optimise_export_alert_active
+        state: 'off'
+      - condition: template
+        value_template: '{{ is_state(''binary_sensor.powerwall_data_fresh'',''on'') and state_attr(''sensor.powerwall_grid_power'',''unit_of_measurement'')
+          == ''kW'' and is_number(states(''sensor.powerwall_grid_power'')) and states(''sensor.powerwall_grid_power'')
+          | float(0) < -0.2 }}'
+      sequence:
+      - action: notify.existing_alert_devices
+        data:
+          title: Electricity export has started
+          message: |-
+            Your home has started sustained grid export: {{ (0 - (states('sensor.powerwall_grid_power') | float(0))) | round(2) }} kW.
+            Battery output: {{ states('sensor.powerwall_battery_power') }} kW.
+            Solar generation: {{ states('sensor.powerwall_solar_power') }} kW.
+            Battery charge: {{ states('sensor.powerwall_percentage_charged') }}%.
+            Confirmed after export exceeded 200 W for one minute.
+          data:
+            tag: optimise_grid_export
+      - action: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.optimise_export_alert_active
+      - action: persistent_notification.create
+        data:
+          notification_id: optimise_grid_export
+          title: Electricity export active
+          message: |-
+            Your home has started sustained grid export: {{ (0 - (states('sensor.powerwall_grid_power') | float(0))) | round(2) }} kW.
+            Battery output: {{ states('sensor.powerwall_battery_power') }} kW.
+            Solar generation: {{ states('sensor.powerwall_solar_power') }} kW.
+            Battery charge: {{ states('sensor.powerwall_percentage_charged') }}%.
+            Confirmed after export exceeded 200 W for one minute.
+    - conditions:
+      - condition: state
+        entity_id: binary_sensor.optimise_grid_export_active
+        state: 'off'
+      - condition: state
+        entity_id: input_boolean.optimise_export_alert_active
+        state: 'on'
+      - condition: template
+        value_template: '{{ is_state(''binary_sensor.powerwall_data_fresh'',''on'') and state_attr(''sensor.powerwall_grid_power'',''unit_of_measurement'')
+          == ''kW'' and is_number(states(''sensor.powerwall_grid_power'')) and states(''sensor.powerwall_grid_power'')
+          | float(0) >= -0.05 }}'
+      sequence:
+      - action: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.optimise_export_alert_active
+      - action: persistent_notification.dismiss
+        continue_on_error: true
+        data:
+          notification_id: optimise_grid_export
+  mode: single
+  max_exceeded: silent
+  trace:
+    stored_traces: 10
+template:
+- binary_sensor:
+  - name: Optimise grid export active
+    unique_id: optimise_grid_export_active
+    device_class: power
+    state: |-
+      {% set power = states('sensor.powerwall_grid_power') %}
+      {% set valid = is_state('binary_sensor.powerwall_data_fresh','on')
+         and state_attr('sensor.powerwall_grid_power','unit_of_measurement') == 'kW'
+         and is_number(power)
+         and states('input_boolean.optimise_export_alert_active') in ['on','off'] %}
+      {% if not valid %}
+        {{ none }}
+      {% else %}
+        {{ power | float < (-0.05 if is_state('input_boolean.optimise_export_alert_active','on') else -0.2) }}
+      {% endif %}
+    delay_on:
+      seconds: 60
+    delay_off:
+      minutes: 2
