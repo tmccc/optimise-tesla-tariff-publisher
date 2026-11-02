@@ -23,6 +23,7 @@ from readback import _get
 from active_mode import read_active_mode
 from optimise_tariff_preview.compiler import compile_preview
 from date_compiler import build_date_candidate
+from planning_pricing import normalize_policy, policy_hash
 from tariff_schema import semantic_hash, rate_at, select_installed_tariff
 from writer import TariffWriter, validate_candidate
 from recurring_state import decide_cycle, _instant
@@ -78,18 +79,24 @@ def collect():
         baseline, baseline_source = select_installed_tariff(info, rate)
         if semantic_hash(baseline) != snapshot['current_tariff_hash']:
             raise ValueError('tariff_changed_during_collection')
-        built = build_date_candidate(preview, baseline, now=now(), unquoted_policy='frozen_current_quote')
+        built = build_date_candidate(preview, baseline, now=now(), unquoted_policy='frozen_current_quote',
+            planning_policy=policy.get('planning_price_policy'))
         candidate, manifest = built.get('tariff'), built.get('manifest', {})
-        exact = bool(candidate and manifest.get('quoted_intervals')) and all(
+        expected_rows=manifest.get('planning_quoted_intervals',manifest.get('quoted_intervals',[]))
+        exact = bool(candidate and expected_rows) and all(
             rate_at(candidate, _instant(row['valid_from']), direction)
             == Decimal(row[direction+'_gbp_per_kwh'])
-            for row in manifest.get('quoted_intervals', []) for direction in ('import','export'))
+            for row in expected_rows for direction in ('import','export'))
         state.update({key: manifest.get(key) for key in
             ('source_last_success','source_captured_at','known_valid_from','known_valid_until')})
         state.update(candidate_valid=bool(candidate and built.get('candidate_valid')
             and not validate_candidate(candidate, manifest, now=now())),
             candidate_prices_verified=exact,
             candidate_tariff_hash=semantic_hash(candidate) if candidate else None)
+        if policy.get('planning_price_policy') is not None:
+            state['planning_manifest']={key:manifest.get(key) for key in (
+                'planning_policy','planning_policy_sha256','planning_adjustment_scope',
+                'planning_quoted_intervals','quoted_intervals','known_valid_from','known_valid_until')}
     except Exception:
         state.update(source_read_failed=True, candidate_valid=False, candidate_prices_verified=False)
     return state, candidate, manifest
@@ -109,7 +116,38 @@ def _commit(state, *, pending=None):
         private_json(PENDING, {})
         state.pop('pending', None)
     state.update(ownership=records['ownership'], lease=records['lease'])
+    _record_verified_planning_status(state,records,pending=pending)
     return True
+
+
+def _record_verified_planning_status(state,records, *, pending=None):
+    """Telemetry only after ownership commit; never certify a proposal."""
+    manifest=state.get('planning_manifest')
+    policy=(state.get('policy') or {}).get('planning_price_policy')
+    owner=records.get('ownership') or {}
+    if (records.get('verified') is not True or state.get('candidate_prices_verified') is not True
+        or not isinstance(manifest,dict) or policy is None
+        or state.get('candidate_tariff_hash')!=owner.get('tariff_semantic_hash')):
+        return
+    try:
+        expected=normalize_policy(policy)
+        if (manifest.get('planning_policy')!=expected
+            or manifest.get('planning_policy_sha256')!=policy_hash(expected)
+            or manifest.get('planning_adjustment_scope')!='quoted_intervals_only'):
+            return
+        status={key:manifest.get(key) for key in (
+            'planning_policy','planning_policy_sha256','planning_adjustment_scope',
+            'planning_quoted_intervals','quoted_intervals','known_valid_from','known_valid_until')}
+        status.update(schema_version=1,verified=True,verified_at=now().isoformat(),
+            tariff_hash=owner['tariff_semantic_hash'],policy_generation=owner.get('policy_generation'),
+            tariff_written_at=owner.get('written_at'),
+            verification_kind='publication' if pending else 'owned_tariff_renewal',
+            planning_prices_are_billing_prices=False,unquoted_planning_adjustments_applied=False)
+        private_json(OUTPUT/'planning-status.json',status)
+    except (ValueError,TypeError,KeyError,OSError):
+        # A telemetry-file failure must not negate a verified ownership/lease
+        # commit or imply that another tariff command should be attempted.
+        state['planning_status_unavailable']=True
 
 
 def _observe_pending(state, read_snapshot):

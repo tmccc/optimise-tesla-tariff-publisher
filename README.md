@@ -155,6 +155,21 @@ sustained grid-export start notifications.
 Adapt the source entities and existing notification service before installing;
 the publisher does not install these automations automatically.
 
+## Optional customer-incentive planning approximation
+
+An explicitly configured recurring policy can apply an early-bird planning
+approximation to genuine quoted intervals: subtract 3p/kWh from both buy and sell
+prices at 00:00–06:00, then add 3p/kWh to sell prices at 16:00–19:00. Dates are
+bounded and windows use Europe/London local time. The overnight sell reduction
+is a deliberate planning assumption; it is not the customer's actual export rate.
+
+Raw provider quotes, frozen assumptions outside the quoted window, freshness
+checks and negative/crossed-price rejection remain distinct. The writer rebuilds
+and verifies the complete projection before a tariff command. See the
+[planning policy and limits](docs/recurring-operation.md#optional-early-bird-planning-prices)
+and [synthetic policy example](examples/planning-price-policy.example.json).
+This option does not enable live execution or clear a manual pause.
+
 ## Important operational limits
 
 - Tesla's documented API adjusts negative prices and import prices below export

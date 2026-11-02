@@ -44,6 +44,16 @@ class ReaderTests(unittest.TestCase):
         self.assertIn('import_metadata_or_availability_invalid',source['source_validation_errors'])
         self.assertIn('import_state_value_invalid',source['source_validation_errors'])
 
+    def test_customer_adjusted_entity_cannot_be_discounted_again(self):
+        original=states()
+        def adjusted(key):
+            row=original(key)
+            if key=='import':row['attributes']['customer_pricing_rule']='existing-adjustment'
+            return row
+        with patch.object(ha_reader,'_state',side_effect=adjusted):source=ha_reader.read_live_source()
+        self.assertIn('import_customer_adjusted_source_rejected',source['source_validation_errors'])
+        self.assertEqual(source['price_basis'],'raw_eon_optimise_api')
+
     def test_enrollment_unknown_does_not_become_false(self):
         original=states()
         def unknown(key):return {'state':'unavailable'} if key=='battery_enrolled' else original(key)

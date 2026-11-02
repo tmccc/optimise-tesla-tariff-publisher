@@ -18,6 +18,7 @@ import subprocess
 import sys
 
 from date_compiler import build_date_candidate
+from planning_pricing import normalize_policy, policy_hash
 from runtime import FallbackAdapter, POLICY as FALLBACK_POLICY, live_policy_enabled, private_document
 from auth import secret_reader_source
 from config import ROOT, STATE_DIR, task_env
@@ -93,11 +94,20 @@ def validate_candidate(candidate, manifest, *, now):
             'source_last_success': manifest.get('source_last_success'),
             'source_captured_at': manifest.get('source_captured_at'), 'periods': deepcopy(rows)}
         rebuilt = build_date_candidate(preview, candidate, now=clock,
-            unquoted_policy='frozen_current_quote')
+            unquoted_policy='frozen_current_quote',planning_policy=manifest.get('planning_policy'))
         if not rebuilt.get('candidate_valid') or rebuilt.get('tariff') is None:
             errors.add('quote_rebuild_failed')
         elif semantic_hash(rebuilt['tariff']) != semantic_hash(candidate):
             errors.add('candidate_quote_semantics_mismatch')
+        if manifest.get('planning_policy') is not None:
+            policy=normalize_policy(manifest['planning_policy'])
+            if (manifest.get('planning_policy_sha256')!=policy_hash(policy)
+                or manifest.get('planning_quoted_intervals')!=rebuilt.get('manifest',{}).get('planning_quoted_intervals')
+                or manifest.get('planning_prices_are_billing_prices') is not False
+                or manifest.get('planning_price_basis')!='tesla_earlybird_approximation'
+                or manifest.get('planning_adjustment_scope')!='quoted_intervals_only'
+                or manifest.get('planning_unquoted_scope')!=policy['unquoted_scope']):
+                errors.add('planning_metadata_mismatch')
     except Exception:
         # Never stringify an arbitrary manifest/provider value.
         errors.add('candidate_metadata_invalid')

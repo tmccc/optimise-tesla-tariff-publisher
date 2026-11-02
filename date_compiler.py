@@ -12,6 +12,8 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from tariff_schema import canonical_hash, to_upload_tariff, validate_tariff
+from planning_pricing import (normalize_policy, policy_hash, overlay_pattern,
+                              planning_quote_rows)
 
 UTC = timezone.utc
 LONDON = ZoneInfo("Europe/London")
@@ -168,7 +170,8 @@ def _compile_channel(original: dict, days: list[tuple], *, placeholder: bool) ->
 
 
 def build_date_candidate(preview: dict, baseline: dict, *, now: datetime,
-                         unquoted_policy: str = "preserve_baseline") -> dict:
+                         unquoted_policy: str = "preserve_baseline",
+                         planning_policy: dict | None = None) -> dict:
     """Overlay quoted intervals by date; never activate or invent a price quote.
 
     ``disabled_zero_placeholder`` is an explicit *proposal*, not a safe operating
@@ -191,6 +194,17 @@ def build_date_candidate(preview: dict, baseline: dict, *, now: datetime,
         return result
     if unquoted_policy not in POLICIES:
         error("unknown_unquoted_policy")
+        return result
+    try:
+        planning_policy=normalize_policy(planning_policy)
+    except (ValueError,TypeError,KeyError,OverflowError):
+        error('planning_policy_invalid')
+        return result
+    if planning_policy is not None and preview.get('price_basis') not in (None,'raw_eon_optimise_api'):
+        error('planning_source_already_adjusted')
+        return result
+    if planning_policy is not None and unquoted_policy!='frozen_current_quote':
+        error('planning_policy_requires_frozen_quote')
         return result
     if not isinstance(preview, dict) or preview.get("valid") is not True or preview.get("errors"):
         error("preview_not_validated")
@@ -292,13 +306,23 @@ def build_date_candidate(preview: dict, baseline: dict, *, now: datetime,
                 current_day = next((key for key in by_date if _md(key) == index), None)
                 if current_day is not None:
                     base = _overlay(base, by_date[current_day], direction)
+                if planning_policy is not None:
+                    # Only actual quoted dates receive adjustments. The
+                    # reference date is inert when quoted_minutes is empty.
+                    actual_day=current_day or day
+                    base=_merge(overlay_pattern(base,day=actual_day,direction=direction,
+                        policy=planning_policy,quoted_minutes=by_date.get(current_day,{})))
                 patterns.append(base)
             channels.append(_compile_channel(original, patterns, placeholder=placeholder))
-    except (ValueError, TypeError, KeyError, StopIteration, OverflowError):
-        error("baseline_overlay_unsupported")
+    except (ValueError, TypeError, KeyError, StopIteration, OverflowError) as exc:
+        error('planning_negative_price' if str(exc)=='planning_negative_price' else "baseline_overlay_unsupported")
         return result
     candidate = channels[0]
     candidate["sell_tariff"] = channels[1]
+    if planning_policy is not None:
+        for part in (candidate,candidate['sell_tariff']):
+            part['name']='Next Optimise (HA planning rates)'
+            part['code']='HA_EON_OPTIMISE_PLANNING'
     candidate = to_upload_tariff(candidate)
     strict_errors = validate_tariff(candidate, strict_compatibility=True)
     if strict_errors:
@@ -345,4 +369,13 @@ def build_date_candidate(preview: dict, baseline: dict, *, now: datetime,
         "baseline_sha256": canonical_hash(baseline), "tariff_sha256": canonical_hash(candidate),
         "controls_changed": False, "tesla_requests_sent": 0,
     }
+    if planning_policy is not None:
+        result['manifest'].update(planning_policy=planning_policy,
+            planning_policy_sha256=policy_hash(planning_policy),
+            planning_quoted_intervals=planning_quote_rows(result['manifest']['quoted_intervals'],planning_policy,LONDON),
+            planning_prices_are_billing_prices=False,
+            planning_price_basis='tesla_earlybird_approximation',
+            planning_export_understatement_p_per_kwh=3,
+            planning_adjustment_scope='quoted_intervals_only',
+            planning_unquoted_scope=planning_policy['unquoted_scope'])
     return result

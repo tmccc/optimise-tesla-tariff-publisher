@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "kind": "eon_earlybird_planning_v1",
+  "rule_id": "example-earlybird-planning-v1",
+  "timezone": "Europe/London",
+  "start_date": "2026-01-01",
+  "end_date_exclusive": "2027-01-01",
+  "overnight_reduction_p_per_kwh": 3,
+  "peak_export_bonus_p_per_kwh": 3,
+  "source_price_basis": "raw_eon_optimise_api",
+  "unquoted_scope": "quoted_only"
+}

@@ -138,6 +138,9 @@ def read_live_source():
             or attrs.get('price_basis') != ('import_cost' if direction == 'import' else 'export_earnings')
             or state.get('state') in ('unavailable', 'unknown')):
             errors.append(direction + '_metadata_or_availability_invalid')
+        if (attrs.get('customer_adjustment_applied') is True
+            or attrs.get('customer_pricing_rule') or attrs.get('customer_pricing')):
+            errors.append(direction + '_customer_adjusted_source_rejected')
         try:
             numeric_state=float(state.get('state'))
             if not math.isfinite(numeric_state):raise ValueError()
@@ -152,6 +155,7 @@ def read_live_source():
     captured = datetime.now(UTC)
     return {'schema_version': 1, 'captured_at': captured.isoformat(),
         'last_success': last_success, 'timezone': 'Europe/London', 'unit': 'p/kWh', 'currency': 'GBP',
+        'price_basis':'raw_eon_optimise_api',
         'source': 'Explicit Home Assistant bearer-token state API; no history or auth-store reads',
         'channels': channels, 'source_validation_errors': errors}
 

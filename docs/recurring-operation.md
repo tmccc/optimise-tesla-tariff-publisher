@@ -87,6 +87,43 @@ An omitted provider field remains `not_reported`, rather than becoming an
 invented boolean. The controller never grants energy-command permissions or
 changes Amber/E.ON authorisation.
 
+## Optional early-bird planning prices
+
+The recurring policy may include `planning_price_policy`, using the bounded
+structure in [the example](../examples/planning-price-policy.example.json).
+This option requires explicit operator approval; a personal discount is never
+inferred from an account, a product name or a price difference.
+
+The supported `eon_earlybird_planning_v1` approximation subtracts 3p/kWh from
+**both** import and export during 00:00–06:00, and adds 3p/kWh to export alone
+during 16:00–19:00. Windows and inclusive start/exclusive expiry dates use
+`Europe/London`, including GMT/BST changes. This differs from actual customer
+prices: the real early-bird overnight offer discounts import alone. Keep billing
+and observed-cost calculations on those true prices. The synthetic overnight
+sell rate can discourage overnight exports; its financial effect depends on the
+energy actually exported during those hours.
+
+Only genuine quoted intervals receive the planning adjustment. The compiler
+first fills the existing approved `frozen_current_quote` schedule from **raw**
+source prices, then adjusts quoted clock periods. Unquoted future and elapsed
+calendar placeholders retain their original raw frozen pair. Applying a bonus
+to an equal-price unquoted placeholder could otherwise create a crossed pair
+that neither the source nor this compiler supports. These placeholders remain
+planning assumptions rather than future or historical quotes.
+
+Raw quote rows, their source timestamps and the raw assumed pair stay in the
+manifest. Separate `planning_quoted_intervals`, policy hash, rule dates and
+`planning_adjustment_scope: quoted_intervals_only` disclose the projection.
+The writer rebuilds the entire candidate from those raw rows and the exact
+policy before allowing an upload. Negative or crossed results are still
+rejected; neither rule silently clamps them. Already customer-adjusted source
+entities are refused to prevent applying the incentive twice.
+
+After a successful matching ownership commit, `planning-status.json` records
+the verified planning policy, quote horizon and tariff hash. A proposal alone
+cannot create that status. Lease renewal refreshes `verified_at` while retaining
+the original `tariff_written_at`; it does not claim another tariff POST.
+
 ## Inspection and stopping
 
 Use the service commands in [the deployment guide](recurring-services.md) and

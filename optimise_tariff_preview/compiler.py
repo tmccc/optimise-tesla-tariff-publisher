@@ -98,6 +98,8 @@ def compile_preview(source: dict, *, now: datetime | None = None) -> dict:
     if not isinstance(source, dict):
         issue(errors, "invalid_source", "The source must be an object.")
         return result
+    if 'price_basis' in source:
+        result['price_basis']=source['price_basis'] if isinstance(source['price_basis'],str) else 'unverified'
     try:
         clock = _instant(now if now is not None else source.get("now", datetime.now(UTC)))
     except (ValueError, TypeError, OverflowError):
