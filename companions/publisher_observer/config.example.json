@@ -1,0 +1,21 @@
+{
+  "hass_url": "http://127.0.0.1:8123",
+  "token_file": "/absolute/private/path/home-assistant-token",
+  "state_dir": "/absolute/private/path/publisher-observation-state",
+  "customer_pricing_file": null,
+  "record_from": "2026-01-02T23:55:00Z",
+  "capture_until": "2026-01-03T20:05:00Z",
+  "windows": {
+    "overall": ["2026-01-03T00:00:00Z", "2026-01-03T20:00:00Z"],
+    "overnight": ["2026-01-03T00:00:00Z", "2026-01-03T06:00:00Z"],
+    "peak": ["2026-01-03T16:00:00Z", "2026-01-03T19:00:00Z"]
+  },
+  "entities": {
+    "prices_success": "sensor.optimise_prices_last_successful_update",
+    "status_success": "sensor.optimise_status_last_successful_update",
+    "battery_enrolled": "binary_sensor.optimise_battery_enrolled",
+    "optimise_import": "sensor.optimise_import_price",
+    "optimise_export": "sensor.optimise_export_price",
+    "comparison": "sensor.optimise_agile_comparison"
+  }
+}

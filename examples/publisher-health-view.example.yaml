@@ -1,0 +1,69 @@
+# Append this read-only view to a dashboard's views list after installing the
+# optional observer. Missing observations stay unavailable, never zero cost.
+title: Publisher health
+path: publisher-health
+icon: mdi:heart-pulse
+cards:
+  - type: markdown
+    title: Publisher
+    content: >-
+      {% set stamp = as_timestamp(state_attr('sensor.optimise_publisher_health', 'updated_at'), none) %}
+      {% set age = as_timestamp(now()) - stamp if stamp is number else none %}
+      {% if age is not number or age < 0 or age > 180 %}
+      **Publisher observation unavailable or stale.** Retained readings do not establish current health.
+      {% else %}
+      **{{ states('sensor.optimise_publisher_health') | title }}**
+
+      {% set p = state_attr('sensor.optimise_publisher_health', 'planning') or {} %}
+      Planning verification: **{{ p.get('status', 'unavailable') }}**.
+
+      {% if p.get('status') == 'verified' %}
+      Planning prices: **{{ p.get('current_import_p') }}p import / {{ p.get('current_export_p') }}p export**.
+      {% endif %}
+
+      Planning rates apply to available quoted periods. Unquoted periods retain
+      the approved static assumption. Actual billing rates remain separate.
+      {% endif %}
+  - type: entities
+    title: Controller observations
+    show_header_toggle: false
+    entities:
+      - entity: sensor.optimise_publisher_actual_mode
+        name: Observed mode
+      - entity: sensor.optimise_publisher_backup_reserve
+        name: Observed reserve
+      - entity: sensor.optimise_publisher_last_cycle
+        name: Last publisher check
+      - entity: sensor.optimise_publisher_last_verified_tariff
+        name: Last verified tariff publication
+      - entity: sensor.optimise_publisher_lease_expires
+        name: Lease expiry
+      - entity: sensor.optimise_publisher_watchdog_last_seen
+        name: Watchdog heartbeat
+  - type: markdown
+    title: Observed cycle costs
+    content: |-
+      {% macro n(value, digits=2) -%}
+      {{ ('%.' ~ digits ~ 'f') | format(value) if value is number and value is not boolean else '—' }}
+      {%- endmacro %}
+      {% set all = state_attr('sensor.optimise_cycle_observation', 'summary') or {} %}
+      {% for key, label in [('overnight', 'Overnight'), ('peak', 'Peak')] %}
+      {% set s = all.get(key) or {} %}
+      **{{ label }}**
+
+      {% if s.get('expected_hours') is not number or s.get('expected_hours') <= 0 %}
+      Awaiting observations for this window.
+      {% else %}
+      Net energy cost: **£{{ n(s.get('net_cost_gbp')) }}**.
+      Import cost: £{{ n(s.get('import_cost_gbp')) }}; export income: £{{ n(s.get('export_revenue_gbp')) }}.
+      Measured coverage: {{ n(s.get('coverage_percent'), 1) }}%; priced coverage: {{ n(s.get('priced_coverage_percent'), 1) }}%.
+      {% if s.get('net_cost_is_partial', true) %}
+      **Partial totals: missing measurements or prices remain.**
+      {% endif %}
+      {% endif %}
+
+      {% endfor %}
+      Customer adjustments apply only when explicitly configured. These are
+      sampled unit-cost estimates, excluding standing charges, not settled bills
+      or proven controller savings. Check the observation update time before
+      interpreting retained totals as current.

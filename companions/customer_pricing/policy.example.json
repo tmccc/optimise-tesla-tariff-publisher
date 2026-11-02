@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "rule_id": "example-confirmed-incentive-v1",
+  "source_prices_include_incentive": false,
+  "timezone": "Europe/London",
+  "start_date": "2026-01-01",
+  "end_date_exclusive": "2027-01-01",
+  "import_discount_p": 3,
+  "import_window": {"start": "00:00", "end": "06:00"},
+  "export_bonus_p": 3,
+  "export_window": {"start": "16:00", "end": "19:00"}
+}

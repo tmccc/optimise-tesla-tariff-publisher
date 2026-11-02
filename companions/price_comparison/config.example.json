@@ -1,0 +1,11 @@
+{
+  "hass_url": "http://127.0.0.1:8123",
+  "token_file": "/absolute/private/path/home-assistant-token",
+  "state_dir": "/absolute/private/path/price-comparison-state",
+  "optimise_import": "sensor.optimise_import_price",
+  "optimise_export": "sensor.optimise_export_price",
+  "optimise_last_success": "sensor.optimise_prices_last_successful_update",
+  "agile_import_product": "YOUR_AGILE_IMPORT_PRODUCT",
+  "agile_export_product": "YOUR_AGILE_EXPORT_PRODUCT",
+  "customer_pricing_file": null
+}

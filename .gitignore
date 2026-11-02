@@ -37,3 +37,14 @@ tessie-scope-cache.json
 *-token.txt
 *-backup.json
 live-test-report.txt
+planning-status.json
+observer-status.json
+summary.json
+final-report.*
+priced-segments.csv
+observed.json
+cache.json
+offer.json
+config.json
+*-result.json
+*-result-*.json

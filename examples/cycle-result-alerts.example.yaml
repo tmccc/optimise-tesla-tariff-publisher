@@ -1,0 +1,83 @@
+# Optional HA package. Replace the notify action with the same notification
+# group used by your other alerts. Do not install until the observer is running.
+# Restored last-key markers are set only after notification acceptance.
+input_text:
+  optimise_overnight_result_last_notified:
+    name: Optimise overnight result last notified
+    max: 64
+  optimise_peak_result_last_notified:
+    name: Optimise peak result last notified
+    max: 64
+
+automation:
+  - id: optimise_observed_cycle_results_ready
+    alias: Optimise observed cycle results ready
+    mode: single
+    max_exceeded: silent
+    triggers:
+      - trigger: state
+        entity_id: sensor.optimise_cycle_observation
+      - trigger: time_pattern
+        minutes: /1
+      - trigger: homeassistant
+        event: start
+    actions:
+      - repeat:
+          for_each:
+            - scope: overnight
+              label: Overnight
+              marker: input_text.optimise_overnight_result_last_notified
+            - scope: peak
+              label: Peak
+              marker: input_text.optimise_peak_result_last_notified
+          sequence:
+            - variables:
+                result: >-
+                  {{ (state_attr('sensor.optimise_cycle_observation', 'window_results') or {}).get(repeat.item.scope) or {} }}
+            - if:
+                - condition: template
+                  value_template: >-
+                    {% set stamp = as_timestamp(state_attr('sensor.optimise_cycle_observation', 'updated_at'), none) %}
+                    {% set age = as_timestamp(now()) - stamp if stamp is number else none %}
+                    {% set ended = as_timestamp(result.get('end'), none) %}
+                    {% set ready = as_timestamp(result.get('ready_at'), none) %}
+                    {% set key = result.get('key', '') %}
+                    {{ states('sensor.optimise_cycle_observation') in ['recording', 'complete']
+                       and age is number and 0 <= age <= 180
+                       and ended is number and ready is number
+                       and ended + 120 <= ready <= stamp
+                       and result.get('status') == 'ready'
+                       and key is string and key | regex_match('^[a-f0-9]{20}$')
+                       and states(repeat.item.marker) not in ['unknown', 'unavailable']
+                       and states(repeat.item.marker) != key }}
+              then:
+                - variables:
+                    totals: '{{ result.get("summary") or {} }}'
+                - action: notify.replace_with_your_existing_notify_group
+                  data:
+                    title: '{{ repeat.item.label }} Optimise results ready'
+                    message: >-
+                      {% macro n(value) -%}
+                      {{ '%.2f' | format(value) if value is number and value is not boolean else 'unavailable' }}
+                      {%- endmacro %}
+                      {% if totals.get('covered_hours', 0) > 0 and totals.get('priced_covered_hours', 0) > 0 %}
+                      Estimated net energy cost £{{ n(totals.get('net_cost_gbp')) }};
+                      import £{{ n(totals.get('import_cost_gbp')) }};
+                      export income £{{ n(totals.get('export_revenue_gbp')) }}.
+                      {% else %}
+                      No complete priced observations; cost is unavailable.
+                      {% endif %}
+                      Measured coverage {{ n(totals.get('coverage_percent')) }}%;
+                      priced coverage {{ n(totals.get('priced_coverage_percent')) }}%.
+                      {% if totals.get('net_cost_is_partial', true) %}Partial totals; gaps remain.{% endif %}
+                      Customer-adjusted prices apply only when configured.
+                      Sampled estimates are not settled bills or proven savings.
+                    data:
+                      tag: '{{ "optimise-result-" ~ repeat.item.scope ~ "-" ~ result.key }}'
+                      url: /optimise-dashboard/publisher-health
+                      clickAction: /optimise-dashboard/publisher-health
+                - action: input_text.set_value
+                  target:
+                    entity_id: '{{ repeat.item.marker }}'
+                  data:
+                    value: '{{ result.key }}'

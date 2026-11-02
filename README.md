@@ -172,6 +172,13 @@ This option does not enable live execution or clear a manual pause.
 
 ## Important operational limits
 
+Optional [read-only reporting companions](companions/README.md) provide
+customer-adjusted prices, Agile/wholesale comparisons, publisher health and a
+bounded overnight/peak observation. They keep true billing rates separate from
+Tesla's planning approximation. Generic health-view and result-alert examples
+are included; no live configuration, private observations or credentials are
+part of this repository.
+
 - Tesla's documented API adjusts negative prices and import prices below export
   prices. This code blocks incompatible exact mirrors rather than silently
   changing the supplier's quotes.

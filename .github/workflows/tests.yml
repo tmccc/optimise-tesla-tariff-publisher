@@ -28,3 +28,12 @@ jobs:
           TMPDIR: ${{ runner.temp }}
           OPTIMISE_TESLA_STATE_DIR: ${{ runner.temp }}/optimise-tesla-state
         run: python -m unittest discover -s tests -v
+      - name: Run optional read-only companion tests
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/companions/customer_pricing:$GITHUB_WORKSPACE/companions/price_comparison:$GITHUB_WORKSPACE/companions/publisher_observer"
+          python -m unittest discover -s companions/customer_pricing -p 'test_*.py' -v
+          python -m unittest discover -s companions/price_comparison -p 'test_*.py' -v
+          python -m unittest discover -s companions/publisher_observer -p 'test_*.py' -v
